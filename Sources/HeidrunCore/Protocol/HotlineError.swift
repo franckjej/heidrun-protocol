@@ -43,7 +43,7 @@ extension HotlineError: CustomStringConvertible {
             return "not connected"
         case .notLoggedIn:
             return "not logged in"
-        case .serverError(let id, let message):
+        case let .serverError(id, message):
             if let message {
                 return "server error \(id): \(message)"
             }

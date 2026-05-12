@@ -93,8 +93,10 @@ private final class ContinuationBox: @unchecked Sendable {
         }
         guard let c = captured else { return }
         switch result {
-        case .success: c.resume()
-        case .failure(let e): c.resume(throwing: e)
+        case .success:
+            c.resume()
+        case .failure(let e):
+            c.resume(throwing: e)
         }
     }
 }

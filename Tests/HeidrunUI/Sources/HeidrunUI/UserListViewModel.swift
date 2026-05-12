@@ -69,11 +69,11 @@ public final class UserListViewModel {
         }
     }
 
-    private nonisolated static func log(_ message: String) {
+    nonisolated private static func log(_ message: String) {
         FileHandle.standardError.write(Data("[UserList] \(message)\n".utf8))
     }
 
-    private nonisolated static func logUsers(_ source: String, users: [User]) {
+    nonisolated private static func logUsers(_ source: String, users: [User]) {
         let summary = users.prefix(20).map { "\($0.socket):icon=\($0.icon):\($0.nickname)" }.joined(separator: ", ")
         let suffix = users.count > 20 ? " (+\(users.count - 20) more)" : ""
         log("\(source) \(users.count) user(s) — \(summary)\(suffix)")

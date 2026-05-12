@@ -48,7 +48,7 @@ struct FolderDownloadResumeIntegrationTests {
             on: serverConn,
             files: [
                 .init(name: "alpha.txt", data: alphaTail, expectedAction: .resume(offset: resumeOffset)),
-                .init(name: "beta.txt",  data: betaFull,  expectedAction: .download)
+                .init(name: "beta.txt", data: betaFull, expectedAction: .download)
             ]
         )
 

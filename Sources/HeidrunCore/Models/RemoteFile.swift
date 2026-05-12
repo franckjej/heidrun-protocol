@@ -75,12 +75,12 @@ public struct FourCharCode: Sendable, Hashable, ExpressibleByStringLiteral {
     }
 
     /// Build from exactly four bytes in big-endian order.
-    public init(bytes: (UInt8, UInt8, UInt8, UInt8)) {
+    public init(_ b0: UInt8, _ b1: UInt8, _ b2: UInt8, _ b3: UInt8) {
         self.rawValue =
-            (UInt32(bytes.0) << 24) |
-            (UInt32(bytes.1) << 16) |
-            (UInt32(bytes.2) <<  8) |
-             UInt32(bytes.3)
+            (UInt32(b0) << 24) |
+            (UInt32(b1) << 16) |
+            (UInt32(b2) <<  8) |
+             UInt32(b3)
     }
 
     /// ASCII representation of the code. Non-printable bytes become `.`.
@@ -91,8 +91,8 @@ public struct FourCharCode: Sendable, Hashable, ExpressibleByStringLiteral {
         return String(bytes: bytes.map { (32...126).contains($0) ? $0 : 0x2E }, encoding: .ascii) ?? "...."
     }
 
-    public static let folder:           FourCharCode = "fldr"
-    public static let unresolvedAlias:  FourCharCode = "alis"
-    public static let file:             FourCharCode = "????"
-    public static let unknown:          FourCharCode = "????"
+    public static let folder: FourCharCode = "fldr"
+    public static let unresolvedAlias: FourCharCode = "alis"
+    public static let file: FourCharCode = "????"
+    public static let unknown: FourCharCode = "????"
 }

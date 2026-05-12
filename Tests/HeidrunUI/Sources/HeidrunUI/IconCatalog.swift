@@ -55,7 +55,7 @@ public final class IconCatalog {
         Self.log("loaded \(entries.count) entries (IDs \(minID)–\(maxID))")
     }
 
-    private nonisolated static func log(_ message: String) {
+    nonisolated private static func log(_ message: String) {
         FileHandle.standardError.write(Data("[IconCatalog] \(message)\n".utf8))
     }
 

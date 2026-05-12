@@ -146,7 +146,7 @@ public enum HotlineTrackerClient {
     private static let magicBytes: [UInt8] = [0x48, 0x54, 0x52, 0x4B]  // "HTRK"
 
     /// 6-byte handshake: magic "HTRK" + version 0x00 0x01
-    private static let handshakeBytes: Data = Data([
+    private static let handshakeBytes = Data([
         0x48, 0x54, 0x52, 0x4B,  // "HTRK"
         0x00, 0x01               // version 1
     ])

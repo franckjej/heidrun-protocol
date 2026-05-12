@@ -210,7 +210,7 @@ public enum FolderDownloadDecoder {
     static func parseItemHeader(_ data: Data, encoding: String.Encoding) -> ParsedItemHeader {
         var cursor = ByteCursor(data: data)
         let folderType: UInt16 = cursor.readBigEndian()
-        let count:      UInt16 = cursor.readBigEndian()
+        let count: UInt16 = cursor.readBigEndian()
         var components: [String] = []
         components.reserveCapacity(Int(count))
         for _ in 0..<count {
@@ -244,20 +244,20 @@ public enum FolderDownloadDecoder {
     static func parseInfoBlock(_ data: Data, encoding: String.Encoding) -> InfoBlockMetadata {
         var cursor = ByteCursor(data: data)
         _ = cursor.readData(count: 4)                  // "AMAC"
-        let type:    UInt32 = cursor.readBigEndian()
+        let type: UInt32 = cursor.readBigEndian()
         let creator: UInt32 = cursor.readBigEndian()
         _ = cursor.readData(count: 40)                 // 4 reserved + UInt32 256 + 32 reserved
 
         let creBaseYear: UInt16 = cursor.readBigEndian()
         _ = cursor.readData(count: 2)                  // reserved
-        let creSeconds:  UInt32 = cursor.readBigEndian()
+        let creSeconds: UInt32 = cursor.readBigEndian()
 
         let modBaseYear: UInt16 = cursor.readBigEndian()
         _ = cursor.readData(count: 2)                  // reserved
-        let modSeconds:  UInt32 = cursor.readBigEndian()
+        let modSeconds: UInt32 = cursor.readBigEndian()
         _ = cursor.readData(count: 2)                  // reserved
 
-        let nameLen:    UInt16 = cursor.readBigEndian()
+        let nameLen: UInt16 = cursor.readBigEndian()
         let nameBytes = cursor.readData(count: Int(nameLen))
         let name = String(data: nameBytes, encoding: encoding) ?? ""
 

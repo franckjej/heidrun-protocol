@@ -40,7 +40,7 @@ struct UploadFramingTests {
 
         // DATA magic appears once (after FILP+INFO).
         let dataMagic = Data([0x44, 0x41, 0x54, 0x41])
-        #expect(payload.range(of: dataMagic) != nil)
+        #expect(payload.firstRange(of: dataMagic) != nil)
 
         // MACR magic at the very end (16 bytes from end).
         let macrSlice = payload.suffix(16).prefix(4)
@@ -64,7 +64,7 @@ struct UploadFramingTests {
 
         // Find DATA magic, then the 4-byte length is 12 bytes after it.
         let dataMagic = Data([0x44, 0x41, 0x54, 0x41])
-        let dataMagicRange = payload.range(of: dataMagic)!
+        let dataMagicRange = payload.firstRange(of: dataMagic)!
         let lengthStart = dataMagicRange.lowerBound + 12
         let lengthBytes = payload.subdata(in: lengthStart..<lengthStart + 4)
         #expect(Array(lengthBytes) == [0x00, 0x00, 0x00, 0x64]) // 100

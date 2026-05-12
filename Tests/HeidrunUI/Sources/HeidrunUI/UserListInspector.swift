@@ -97,7 +97,7 @@ public struct UserListInspector: View {
     @ViewBuilder
     private func contextMenu(for user: User) -> some View {
         Button("Send Message…") { onSendMessage(user) }
-        Button("Get Info…")     { onGetInfo(user) }
+        Button("Get Info…") { onGetInfo(user) }
         Divider()
         Button("Copy Nickname") {
             let pb = NSPasteboard.general

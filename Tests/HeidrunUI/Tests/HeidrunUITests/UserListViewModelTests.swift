@@ -25,7 +25,7 @@ struct UserListViewModelTests {
         let client = FakeUserListClient()
         client.fetchUserListResponse = .success([
             User(socket: 1, nickname: "alice"),
-            User(socket: 2, nickname: "bob"),
+            User(socket: 2, nickname: "bob")
         ])
         let vm = UserListViewModel(client: client)
         await vm.start()
@@ -53,7 +53,7 @@ struct UserListViewModelTests {
 
         client.emit(.userListReceived(users: [
             User(socket: 2, nickname: "bob"),
-            User(socket: 3, nickname: "carol"),
+            User(socket: 3, nickname: "carol")
         ]))
         await vm.waitForRosterChange { $0.map(\.nickname) == ["bob", "carol"] }
         #expect(vm.users.map(\.nickname) == ["bob", "carol"])
@@ -64,7 +64,7 @@ struct UserListViewModelTests {
         let client = FakeUserListClient()
         client.fetchUserListResponse = .success([
             User(socket: 1, nickname: "alice"),
-            User(socket: 2, nickname: "bob"),
+            User(socket: 2, nickname: "bob")
         ])
         let vm = UserListViewModel(client: client)
         await vm.start()
@@ -92,7 +92,7 @@ struct UserListViewModelTests {
         let client = FakeUserListClient()
         client.fetchUserListResponse = .success([
             User(socket: 1, nickname: "alice"),
-            User(socket: 2, nickname: "bob"),
+            User(socket: 2, nickname: "bob")
         ])
         let vm = UserListViewModel(client: client)
         await vm.start()

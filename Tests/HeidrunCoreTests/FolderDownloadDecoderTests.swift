@@ -104,7 +104,7 @@ struct FolderDownloadDecoderTests {
         info.append(Data(repeating: 0, count: 2))    // trailing pad
         let parsed = FolderDownloadDecoder.parseInfoBlock(info, encoding: .ascii)
         #expect(parsed.name == "foo")
-        #expect(parsed.comment == "")
+        #expect(parsed.comment.isEmpty)
     }
 
     private func buildInfoBlock(

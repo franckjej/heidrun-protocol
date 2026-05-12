@@ -99,7 +99,7 @@ public enum PacketCodec {
         fields.reserveCapacity(Int(count))
         for _ in 0..<Int(count) {
             guard cursor.remaining >= 4 else { break }
-            let key:    UInt16 = cursor.readBigEndian()
+            let key: UInt16 = cursor.readBigEndian()
             let length: UInt16 = cursor.readBigEndian()
             guard cursor.remaining >= Int(length) else { break }
             let data = cursor.readData(count: Int(length))

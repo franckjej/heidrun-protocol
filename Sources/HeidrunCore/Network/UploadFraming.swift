@@ -144,5 +144,4 @@ public enum UploadFraming {
         out.appendBigEndian(UInt32(0))                        // resource length
         return out
     }
-
 }

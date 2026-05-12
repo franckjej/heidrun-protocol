@@ -7,7 +7,7 @@ struct ConnectionSettingsTests {
     @Test("login defaults to empty string")
     func loginDefaultsEmpty() {
         let settings = ConnectionSettings(name: "x", address: "x")
-        #expect(settings.login == "")
+        #expect(settings.login.isEmpty)
     }
 
     @Test("login round-trips through init")

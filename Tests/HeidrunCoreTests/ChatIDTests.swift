@@ -6,7 +6,7 @@ import Testing
 struct ChatIDTests {
     @Test("byte tuple round-trips through bytes property")
     func tupleRoundTrip() {
-        let id = ChatID(bytes: (0xDE, 0xAD, 0xBE, 0xEF))
+        let id = ChatID(0xDE, 0xAD, 0xBE, 0xEF)
         #expect(id.rawValue == 0xDEAD_BEEF)
         #expect(id.bytes == [0xDE, 0xAD, 0xBE, 0xEF])
     }
@@ -31,7 +31,7 @@ struct ChatIDTests {
 
     @Test("equal raw values produce equal IDs (Hashable holds)")
     func hashableHolds() {
-        let a = ChatID(bytes: (1, 2, 3, 4))
+        let a = ChatID(1, 2, 3, 4)
         let b = ChatID(rawValue: 0x0102_0304)
         var set = Set<ChatID>()
         set.insert(a)

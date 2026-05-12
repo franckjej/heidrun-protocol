@@ -36,9 +36,12 @@ private final class MiniTrackerServer: @unchecked Sendable {
                     } else {
                         box.tryResume(.failure(Failure.noPort))
                     }
-                case .failed(let err): box.tryResume(.failure(err))
-                case .cancelled: box.tryResume(.failure(Failure.cancelled))
-                default: break
+                case .failed(let err):
+                    box.tryResume(.failure(err))
+                case .cancelled:
+                    box.tryResume(.failure(Failure.cancelled))
+                default:
+                    break
                 }
             }
             server.listener.start(queue: server.queue)
@@ -93,8 +96,10 @@ private final class ResumeBox<T: Sendable>: @unchecked Sendable {
         let c: CheckedContinuation<T, Error>? = lock.withLock { defer { cont = nil }; return cont }
         guard let c else { return }
         switch result {
-        case .success(let v): c.resume(returning: v)
-        case .failure(let e): c.resume(throwing: e)
+        case .success(let v):
+            c.resume(returning: v)
+        case .failure(let e):
+            c.resume(throwing: e)
         }
     }
 }
@@ -110,7 +115,7 @@ private func makeTrackerResponse(
     var entriesData = Data()
     for server in servers {
         let parts = server.address.split(separator: ".").compactMap { UInt8($0) }
-        let a = parts.count > 0 ? parts[0] : 0
+        let a = !parts.isEmpty ? parts[0] : 0
         let b = parts.count > 1 ? parts[1] : 0
         let c = parts.count > 2 ? parts[2] : 0
         let d = parts.count > 3 ? parts[3] : 0
@@ -151,9 +156,9 @@ struct HotlineTrackerClientTests {
     @Test("fetches three servers from a fake tracker")
     func fetchThreeServers() async throws {
         let expected: [TrackerServer] = [
-            TrackerServer(address: "1.2.3.4",   port: 5500, users: 3,  name: "Alpha Server",   description: "First server"),
-            TrackerServer(address: "10.0.0.1",  port: 5501, users: 0,  name: "Beta Server",    description: "Second server"),
-            TrackerServer(address: "192.168.1.1", port: 5502, users: 12, name: "Gamma Server", description: "Third server"),
+            TrackerServer(address: "1.2.3.4", port: 5500, users: 3, name: "Alpha Server", description: "First server"),
+            TrackerServer(address: "10.0.0.1", port: 5501, users: 0, name: "Beta Server", description: "Second server"),
+            TrackerServer(address: "192.168.1.1", port: 5502, users: 12, name: "Gamma Server", description: "Third server")
         ]
 
         let fakeServer = try await MiniTrackerServer.start()
@@ -300,8 +305,8 @@ struct HotlineTrackerClientTests {
         try await serverTask
 
         #expect(result.count == 1)
-        #expect(result[0].name == "")
-        #expect(result[0].description == "")
+        #expect(result[0].name.isEmpty)
+        #expect(result[0].description.isEmpty)
         #expect(result[0].address == "9.9.9.9")
     }
 

@@ -222,8 +222,10 @@ private final class ServerResumeBox<T: Sendable>: @unchecked Sendable {
         }
         guard let c = captured else { return }
         switch result {
-        case .success(let v): c.resume(returning: v)
-        case .failure(let e): c.resume(throwing: e)
+        case .success(let v):
+            c.resume(returning: v)
+        case .failure(let e):
+            c.resume(throwing: e)
         }
     }
 }

@@ -29,7 +29,7 @@ public enum NewsBundleEntryCodec {
         guard data.count >= 4 else { return nil }
         var cursor = ByteCursor(data: data)
         let typeRaw: UInt16 = cursor.readBigEndian()
-        let count:   UInt16 = cursor.readBigEndian()
+        let count: UInt16 = cursor.readBigEndian()
         guard let kind = NewsBundle.Kind(rawValue: typeRaw) else { return nil }
 
         var identifier = Data()

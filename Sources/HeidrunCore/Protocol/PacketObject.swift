@@ -37,7 +37,7 @@ public struct PacketObject: Sendable, Hashable {
     public static func decode(from cursor: inout ByteCursor) -> PacketObject? {
         guard cursor.remaining >= 4 else { return nil }
         let objectID: UInt16 = cursor.readBigEndian()
-        let length:   UInt16 = cursor.readBigEndian()
+        let length: UInt16 = cursor.readBigEndian()
         guard cursor.remaining >= Int(length) else { return nil }
         let body = cursor.readData(count: Int(length))
         return PacketObject(objectID: objectID, data: body)

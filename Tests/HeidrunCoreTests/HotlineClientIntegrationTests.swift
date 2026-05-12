@@ -212,7 +212,7 @@ struct HotlineClientIntegrationTests {
             }
             let first = try await group.next()
             group.cancelAll()
-            return first ?? nil
+            return first
         }
 
         #expect(received == "server going down at midnight")

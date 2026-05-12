@@ -28,9 +28,9 @@ public protocol HotlineHost: Sendable {
 /// Decoupled from `NSColor` / `CGColor` so this package stays portable to
 /// non-AppKit hosts (and unit tests).
 public struct HostColor: Sendable, Hashable {
-    public var red:   Double
+    public var red: Double
     public var green: Double
-    public var blue:  Double
+    public var blue: Double
     public var alpha: Double
 
     public init(red: Double, green: Double, blue: Double, alpha: Double = 1.0) {

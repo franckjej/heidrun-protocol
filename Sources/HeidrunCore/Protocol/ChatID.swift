@@ -12,13 +12,13 @@ public struct ChatID: Sendable, Hashable, RawRepresentable {
         self.rawValue = rawValue
     }
 
-    /// Build from the four bytes the server hands back.
-    public init(bytes: (UInt8, UInt8, UInt8, UInt8)) {
+    /// Build from the four bytes the server hands back, most-significant first.
+    public init(_ b0: UInt8, _ b1: UInt8, _ b2: UInt8, _ b3: UInt8) {
         self.rawValue =
-            (UInt32(bytes.0) << 24) |
-            (UInt32(bytes.1) << 16) |
-            (UInt32(bytes.2) <<  8) |
-             UInt32(bytes.3)
+            (UInt32(b0) << 24) |
+            (UInt32(b1) << 16) |
+            (UInt32(b2) <<  8) |
+             UInt32(b3)
     }
 
     /// Build from a Data payload. Bytes past the fourth are ignored; bytes

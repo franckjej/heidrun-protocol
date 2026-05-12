@@ -22,7 +22,7 @@ public enum UserListEntryCodec {
         guard data.count >= 8 else { return nil }
         var cursor = ByteCursor(data: data)
         let socket: UInt16     = cursor.readBigEndian()
-        let icon:   UInt16     = cursor.readBigEndian()
+        let icon: UInt16     = cursor.readBigEndian()
         let status: UInt16     = cursor.readBigEndian()
         let length: UInt16     = cursor.readBigEndian()
         guard cursor.remaining >= Int(length) else { return nil }

@@ -78,7 +78,7 @@ public actor FileTransferActor {
     /// Hand back an `AsyncThrowingStream` of byte chunks. Each call
     /// returns a fresh stream; only one consumer per transfer is
     /// expected — second calls return a stream that finishes immediately.
-    public nonisolated func bytes() -> AsyncThrowingStream<Data, Error> {
+    nonisolated public func bytes() -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             Task { await self.attach(continuation: continuation) }
         }
