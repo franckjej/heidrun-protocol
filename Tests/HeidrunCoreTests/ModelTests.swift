@@ -58,4 +58,19 @@ struct ModelTests {
         #expect(!TransactionType.noReplySendChat.expectsReply)
         #expect(!TransactionType.noReplyMakeAlias.expectsReply)
     }
+
+    @Test(
+        "NewsCapability splits at server version 151",
+        arguments: [
+            (0, NewsCapability.plain),     // server didn't report a version
+            (100, NewsCapability.plain),     // Hotline 1.0
+            (150, NewsCapability.plain),     // Hotline 1.5.0-beta still flat
+            (151, NewsCapability.threaded),  // first threaded-news build
+            (185, NewsCapability.threaded),  // Hotline 1.8.5
+            (200, NewsCapability.threaded)   // newer reimplementations
+        ] as [(Int, NewsCapability)]
+    )
+    func newsCapabilityThreshold(version: Int, expected: NewsCapability) {
+        #expect(NewsCapability(serverVersion: version) == expected)
+    }
 }

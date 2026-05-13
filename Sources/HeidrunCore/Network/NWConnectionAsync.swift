@@ -9,7 +9,7 @@ import Network
 extension NWConnection {
     /// Send `data` and resume when the lower stack reports the bytes have
     /// been processed (queued for transmission, not necessarily delivered).
-    func sendAsync(_ data: Data) async throws {
+    public func sendAsync(_ data: Data) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.send(content: data, completion: .contentProcessed { error in
                 if let error {
@@ -25,7 +25,7 @@ extension NWConnection {
     /// the buffer fills. Avoids the `NWConnection.receive(min:max:)` quirk
     /// where `min == max` can still deliver fewer bytes if the stream
     /// closes mid-read.
-    func receiveExactly(_ count: Int) async throws -> Data {
+    public func receiveExactly(_ count: Int) async throws -> Data {
         var collected = Data()
         collected.reserveCapacity(count)
         while collected.count < count {
@@ -55,7 +55,7 @@ extension NWConnection {
 
     /// Start the connection and resume once it's `.ready` (or throw on
     /// `.failed` / `.cancelled`).
-    func startAndWaitForReady(on queue: DispatchQueue) async throws {
+    public func startAndWaitForReady(on queue: DispatchQueue) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             // Local actor protecting "fired exactly once" semantics so we
             // never call `cont.resume` twice if the state goes

@@ -8,6 +8,11 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
     /// Hotline protocol version the connection negotiated.
     public var protocolVersion: Int
 
+    /// Version the server reported in its login reply. Zero when the server
+    /// didn't include one (typical for Wired Client / non-Hotline servers).
+    /// Hotline encodes versions as flat integers: 150 = 1.5.0, 185 = 1.8.5.
+    public var serverVersion: Int
+
     /// Server-assigned socket / user id for this connection.
     public var connectionSocket: UInt16
 
@@ -20,12 +25,14 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
     public init(
         clientVersion: Int,
         protocolVersion: Int,
+        serverVersion: Int = 0,
         connectionSocket: UInt16,
         lastTaskNumber: UInt32,
         settings: ConnectionSettings
     ) {
         self.clientVersion = clientVersion
         self.protocolVersion = protocolVersion
+        self.serverVersion = serverVersion
         self.connectionSocket = connectionSocket
         self.lastTaskNumber = lastTaskNumber
         self.settings = settings
@@ -232,8 +239,17 @@ public protocol HotlineClient: Sendable {
 
     // MARK: Threaded news
 
-    /// List bundles or categories at a path.
-    func fetchNewsBundles(at path: RemotePath, isCategory: Bool) async throws -> [NewsBundle]
+    /// List the folders and categories at a path. Send-side mapping is
+    /// transID 370 (`getTNewsPath:category:NO`). Use this when the path
+    /// points at a bundle (folder); for a category's contents call
+    /// `fetchNewsThreads(at:)` instead.
+    func fetchNewsBundles(at path: RemotePath) async throws -> [NewsBundle]
+
+    /// Fetch the threads (posts) inside a category. Send-side mapping is
+    /// transID 371 (`getTNewsPath:category:YES`). The server replies with
+    /// a single `newsThreadList` (object key 321) carrying every thread's
+    /// metadata in one blob.
+    func fetchNewsThreads(at path: RemotePath) async throws -> [NewsThread]
 
     /// Fetch the body of a single thread.
     func fetchNewsThread(

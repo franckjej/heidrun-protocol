@@ -44,6 +44,7 @@ public actor HotlineNetworkClient: HotlineClient {
         HotlineConnectionInfo(
             clientVersion: clientVersion,
             protocolVersion: protocolVersion,
+            serverVersion: serverVersion,
             connectionSocket: connectionSocket,
             lastTaskNumber: nextTaskNumber &- 1,
             settings: connectionSettings
@@ -543,18 +544,25 @@ public actor HotlineNetworkClient: HotlineClient {
 
     // MARK: - Threaded news
 
-    public func fetchNewsBundles(at path: RemotePath, isCategory: Bool) async throws -> [NewsBundle] {
-        // transID 370 for bundles, 371 for categories. Reply contains
-        // 0+ newsBundleEntry(323) fields, each decodable into NewsBundle
-        // via NewsBundleEntryCodec.
-        let transactionID: UInt16 = isCategory ? 371 : 370
+    public func fetchNewsBundles(at path: RemotePath) async throws -> [NewsBundle] {
+        // transID 370. Reply contains 0+ newsBundleEntry(323) fields.
         let reply = try await sendExpectingReply(
-            transactionID: transactionID,
+            transactionID: 370,
             fields: [.path(.newsPath, path, encoding: stringEncoding)]
         )
         return reply
             .filter { $0.key == HotlineObjectKey.newsBundleEntry.rawValue }
             .compactMap { NewsBundleEntryCodec.decode($0.data, encoding: stringEncoding) }
+    }
+
+    public func fetchNewsThreads(at path: RemotePath) async throws -> [NewsThread] {
+        // transID 371. Reply carries a single newsThreadList(321) blob.
+        let reply = try await sendExpectingReply(
+            transactionID: 371,
+            fields: [.path(.newsPath, path, encoding: stringEncoding)]
+        )
+        guard let blob = reply.first(.newsThreadList) else { return [] }
+        return NewsThreadListCodec.decode(blob.data, encoding: stringEncoding)
     }
 
     public func fetchNewsThread(at path: RemotePath, threadID: UInt16, type: String) async throws -> NewsThread {
@@ -584,7 +592,8 @@ public actor HotlineNetworkClient: HotlineClient {
                 title: elementTitle ?? "",
                 author: reply.string(.newsAuthor, encoding: stringEncoding) ?? "",
                 mimeType: reply.string(.newsType, encoding: stringEncoding) ?? ThreadElement.plainTextType,
-                size: UInt16(clamping: bodyBytes)
+                size: UInt16(clamping: bodyBytes),
+                body: elementBody ?? ""
             ))
         }
 
