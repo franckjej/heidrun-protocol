@@ -107,6 +107,8 @@ final class Connection: @unchecked Sendable {
             try await handleGetCategory(header: header, fields: fields)
         case 400:   // get news thread body
             try await handleGetThread(header: header, fields: fields)
+        case 410:   // post threaded news (no-reply on the client side)
+            try await handlePostThread(header: header, fields: fields)
         default:
             // Unknown — respond with empty success so the client doesn't
             // stall on a missing handler.
@@ -255,6 +257,18 @@ final class Connection: @unchecked Sendable {
             header: header,
             fields: [Encoders.newsThreadList(posts, encoding: encoding)]
         )
+    }
+
+    private func handlePostThread(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeNewsPath(from: fields)
+        let title = fields.string(.newsTitle, encoding: encoding) ?? "(untitled)"
+        let body  = fields.string(.newsData, encoding: encoding) ?? ""
+        let post = Post(title: title, author: nickname, body: body)
+        let ok = await state.appendThreadedPost(at: path, post: post)
+        print("[conn \(socketID)] post 410 path=\(path) title=\(title.prefix(40)) -> \(ok ? "OK" : "FAIL")")
+        // Client uses sendNoReply for 410, but acknowledging is harmless
+        // and keeps parity with real Hotline servers (which do reply).
+        try await reply(header: header, errorID: ok ? 0 : 1)
     }
 
     private func handleGetThread(header: PacketHeader, fields: [PacketField]) async throws {

@@ -100,4 +100,27 @@ extension Array where Element == BundleNode {
         }
         return leaf.threads
     }
+
+    /// Append `post` to the category at `components`. Returns `true` on
+    /// success, `false` when the path is missing or doesn't terminate at
+    /// a category.
+    mutating func appendPost(at components: [String], post: Post) -> Bool {
+        insertPost(post: post, at: components, in: &self)
+    }
+}
+
+/// Recursive index-walker — structs need a mutable index path to poke the
+/// leaf without copying the rest of the tree. Lives at file scope so it
+/// doesn't shadow `Array.append` inside the `[BundleNode]` extension.
+private func insertPost(post: Post, at components: [String], in pool: inout [BundleNode]) -> Bool {
+    guard let head = components.first,
+          let idx = pool.firstIndex(where: { $0.name == head }) else {
+        return false
+    }
+    if components.count == 1 {
+        guard pool[idx].kind == .category else { return false }
+        pool[idx].threads.append(post)
+        return true
+    }
+    return insertPost(post: post, at: Array(components.dropFirst()), in: &pool[idx].children)
 }

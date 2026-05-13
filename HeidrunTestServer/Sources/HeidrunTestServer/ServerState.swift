@@ -82,6 +82,12 @@ actor ServerState {
         plainPosts.insert(text, at: 0)
     }
 
+    /// Append a threaded-news post to the category at `path`. Returns
+    /// false if the path doesn't terminate at a category.
+    func appendThreadedPost(at path: [String], post: Post) -> Bool {
+        threaded.appendPost(at: path, post: post)
+    }
+
     /// Broadcast a server-pushed packet to every connected socket.
     func broadcast(_ packet: Data) async {
         let sinks = Array(pushSinks.values)
