@@ -1,7 +1,27 @@
- // MARK: - Threaded news
+import Foundation
+
+extension HotlineNetworkClient {
+
+    // MARK: - Plain news
+
+    public func fetchNewsFeed() async throws -> String {
+            // getNewsList: transID 101, no objects.
+        let reply = try await sendExpectingReply(transactionID: 101, fields: [])
+        return reply.string(.message, encoding: stringEncoding) ?? ""
+    }
+
+    public func postPlainNews(_ text: String) async throws {
+            // postNewNews: transID 103, message(101).
+        try await sendExpectingReply(
+            transactionID: 103,
+            fields: [.string(.message, text, encoding: stringEncoding)]
+        )
+    }
+
+    // MARK: - Threaded news
 
     public func fetchNewsBundles(at path: RemotePath) async throws -> [NewsBundle] {
-        // transID 370. Reply contains 0+ newsBundleEntry(323) fields.
+            // transID 370. Reply contains 0+ newsBundleEntry(323) fields.
         let reply = try await sendExpectingReply(
             transactionID: 370,
             fields: [.path(.newsPath, path, encoding: stringEncoding)]
@@ -12,7 +32,7 @@
     }
 
     public func fetchNewsThreads(at path: RemotePath) async throws -> [NewsThread] {
-        // transID 371. Reply carries a single newsThreadList(321) blob.
+            // transID 371. Reply carries a single newsThreadList(321) blob.
         let reply = try await sendExpectingReply(
             transactionID: 371,
             fields: [.path(.newsPath, path, encoding: stringEncoding)]
@@ -22,12 +42,12 @@
     }
 
     public func fetchNewsThread(at path: RemotePath, threadID: UInt16, type: String) async throws -> NewsThread {
-        // transID 400, [newsPath(325), articleID(326), type(327)].
-        // Reply carries a single thread's fields: parent/prev/next ids,
-        // post date(330), and one element with type(327), title(328),
-        // author(329), data(333). HEClientReceive.m parses them one by
-        // one and stuffs them into a dictionary; we collapse to a typed
-        // NewsThread with a single ThreadElement.
+            // transID 400, [newsPath(325), articleID(326), type(327)].
+            // Reply carries a single thread's fields: parent/prev/next ids,
+            // post date(330), and one element with type(327), title(328),
+            // author(329), data(333). HEClientReceive.m parses them one by
+            // one and stuffs them into a dictionary; we collapse to a typed
+            // NewsThread with a single ThreadElement.
         let reply = try await sendExpectingReply(
             transactionID: 400,
             fields: [
@@ -62,7 +82,7 @@
     }
 
     public func deleteNewsBundle(at path: RemotePath) async throws {
-        // transID 380, no-reply, [newsPath(325)].
+            // transID 380, no-reply, [newsPath(325)].
         try await sendNoReply(
             transactionID: 380,
             fields: [.path(.newsPath, path, encoding: stringEncoding)]
@@ -70,7 +90,7 @@
     }
 
     public func deleteNewsThread(at path: RemotePath, threadID: UInt16, cascade: Bool) async throws {
-        // transID 411, no-reply, [newsPath(325), articleID(326), deleteAll(337)].
+            // transID 411, no-reply, [newsPath(325), articleID(326), deleteAll(337)].
         try await sendNoReply(
             transactionID: 411,
             fields: [
@@ -82,9 +102,9 @@
     }
 
     public func createNewsBundle(at path: RemotePath, name: String, isCategory: Bool) async throws {
-        // transID 381 for bundles, 382 for categories.
-        // For a bundle the name uses fileName (201); for a category it uses
-        // newsCategoryName (322), per HEClient.m line 1229.
+            // transID 381 for bundles, 382 for categories.
+            // For a bundle the name uses fileName (201); for a category it uses
+            // newsCategoryName (322), per HEClient.m line 1229.
         let transactionID: UInt16 = isCategory ? 382 : 381
         let nameKey: HotlineObjectKey = isCategory ? .newsCategoryName : .fileName
         try await sendNoReply(
@@ -103,9 +123,9 @@
         type: String,
         body: String
     ) async throws {
-        // transID 410, no-reply, 6 fields:
-        //   newsPath(325), articleID(326), title(328), articleFlags(334=0),
-        //   type(327), body(333).
+            // transID 410, no-reply, 6 fields:
+            //   newsPath(325), articleID(326), title(328), articleFlags(334=0),
+            //   type(327), body(333).
         try await sendNoReply(
             transactionID: 410,
             fields: [
@@ -118,3 +138,4 @@
             ]
         )
     }
+}
