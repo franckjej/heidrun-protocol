@@ -30,6 +30,9 @@ final class Connection: @unchecked Sendable {
         } catch {
             print("[conn \(socketID)] closed: \(error)")
         }
+        if socketID != 0 {
+            await announceUserLeft(socket: socketID)
+        }
         await state.unregister(socket: socketID)
         connection.cancel()
     }
@@ -93,7 +96,7 @@ final class Connection: @unchecked Sendable {
             try await handleUserInfo(header: header, fields: fields)
         case 304:   // change nickname (no reply)
             await handleNicknameChange(fields: fields)
-        case 305:   // chat
+        case 105:   // chat (client → server send; server pushes back as 106)
             try await handleChat(header: header, fields: fields)
         case 500:   // 185-style ping
             try await reply(header: header)
@@ -160,6 +163,42 @@ final class Connection: @unchecked Sendable {
                 PacketField.string(.serverName, "Heidrun Test Server", encoding: encoding)
             ]
         )
+
+        // Tell every other connected user about the new arrival so
+        // their user-list panes refresh and their chat shows the join
+        // line. Real Hotline servers push transID 301 (`userChanged`)
+        // on login, and 302 (`userLeft`) on disconnect.
+        await announceUserChanged()
+    }
+
+    /// Push a transID 301 (`userChanged`) packet describing the current
+    /// connection's profile to every connected client. Called on login
+    /// (so others see the join) and after a nickname/icon change.
+    private func announceUserChanged() async {
+        let packet = PacketCodec.encode(
+            classID: 0,
+            transactionID: 301,
+            taskNumber: 0,
+            fields: [
+                .uint16(.socket, socketID),
+                .uint16(.icon, icon),
+                .uint16(.status, 0),
+                .string(.nickname, nickname, encoding: encoding)
+            ]
+        )
+        await state.broadcast(packet)
+    }
+
+    /// Push a transID 302 (`userLeft`) for `socket` to every connected
+    /// client. Fired when this connection's read loop ends.
+    private func announceUserLeft(socket: UInt16) async {
+        let packet = PacketCodec.encode(
+            classID: 0,
+            transactionID: 302,
+            taskNumber: 0,
+            fields: [.uint16(.socket, socket)]
+        )
+        await state.broadcast(packet)
     }
 
     private func handleUserList(header: PacketHeader) async throws {
@@ -195,6 +234,9 @@ final class Connection: @unchecked Sendable {
         self.nickname = nick
         self.icon = icon
         await state.updateUser(socket: socketID, nickname: nick, icon: icon)
+        // Push the change so other clients refresh their user-list
+        // entries and matching chat sender labels.
+        await announceUserChanged()
     }
 
     private func handleChat(header: PacketHeader, fields: [PacketField]) async throws {

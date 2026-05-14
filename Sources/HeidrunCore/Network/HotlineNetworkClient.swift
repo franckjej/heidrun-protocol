@@ -31,8 +31,14 @@ public actor HotlineNetworkClient: HotlineClient {
     private var serverVersion: Int = 0
     private var clientVersion: Int = 151
     private var readerTask: Task<Void, Never>?
+    private var pingTask: Task<Void, Never>?
     private var torn = false
     var activeTransfers: [UInt32: FileTransferActor] = [:]
+
+    /// How often the keepalive task sends a `sendPing()` (transID 500)
+    /// after login. Picked to be a little under the 60-second timeout
+    /// that real Hotline servers historically used.
+    public static let keepaliveInterval: Duration = .seconds(30)
 
     // MARK: - HotlineClient surface
 
@@ -64,7 +70,17 @@ public actor HotlineNetworkClient: HotlineClient {
         guard let port = NWEndpoint.Port(rawValue: settings.port) else {
             throw HotlineError.notConnected
         }
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        // TCP keepalive at the OS level catches dead networks (no FIN
+        // ever arrives) that the application-level ping alone can miss.
+        // The app-level `pingTask` covers the "server is up but not
+        // talking" case; the OS keepalive covers "the wire went away".
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        tcp.keepaliveInterval = 10
+        tcp.keepaliveCount = 3
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        let connection = NWConnection(host: host, port: port, using: parameters)
         let queue = DispatchQueue(label: "Heidrun.HotlineNetworkClient")
         try await connection.startAndWaitForReady(on: queue)
         try await Self.performHandshake(on: connection)
@@ -250,6 +266,7 @@ public actor HotlineNetworkClient: HotlineClient {
     private func tearDown(with error: Error?) async {
         guard !torn else { return }
         torn = true
+        stopKeepalive()
         connection.cancel()
         // Fail every pending request.
         let pending = pendingReplies
@@ -259,6 +276,33 @@ public actor HotlineNetworkClient: HotlineClient {
         }
         broadcaster.yield(.disconnected(reason: error.map(String.init(describing:))))
         broadcaster.finish()
+    }
+
+    /// Send a `sendPing()` every `keepaliveInterval` so the server has
+    /// recent activity to base its idle-timeout decision on. A failed
+    /// ping (TCP errored, server closed) tears down immediately, which
+    /// surfaces a `.disconnected` event for the host to react to.
+    private func startKeepalive() {
+        guard pingTask == nil, !torn else { return }
+        let interval = Self.keepaliveInterval
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled { return }
+                guard let self else { return }
+                do {
+                    try await self.sendPing()
+                } catch {
+                    await self.tearDown(with: error)
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopKeepalive() {
+        pingTask?.cancel()
+        pingTask = nil
     }
 
     // MARK: - Transaction helpers
@@ -342,6 +386,10 @@ public actor HotlineNetworkClient: HotlineClient {
         if let server = reply.uint16(.clientVersion) {
             self.serverVersion = Int(server)
         }
+        // Start the heartbeat now that the server has authenticated us.
+        // Pre-login pings would either be ignored or treated as a
+        // protocol violation depending on the server.
+        startKeepalive()
     }
 
     public func agreeToAgreement(nickname: String, icon: UInt16) async throws {
