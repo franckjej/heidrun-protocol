@@ -1,5 +1,6 @@
 import Foundation
-import Network
+import HeidrunCore
+import HeidrunTestServerKit
 
 // MARK: - CLI
 
@@ -49,47 +50,22 @@ func printUsage() {
     """)
 }
 
-// MARK: - Listener
-
-@MainActor
-final class Listener {
-    let listener: NWListener
-    let state: ServerState
-    let queue: DispatchQueue
-
-    init(port: UInt16, state: ServerState) throws {
-        self.state = state
-        self.queue = DispatchQueue(label: "HeidrunTestServer")
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw NSError(domain: "TestServer", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "invalid port \(port)"
-            ])
-        }
-        self.listener = try NWListener(using: .tcp, on: nwPort)
-    }
-
-    func run() async throws {
-        listener.newConnectionHandler = { [state, queue] connection in
-            let wrapper = Connection(connection: connection, state: state, queue: queue)
-            Task { await wrapper.run() }
-        }
-        listener.start(queue: queue)
-
-        // Block forever — Ctrl-C to quit.
-        try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
-    }
-}
-
 // MARK: - Entry point
 
 let options = parseArgs()
-let state = ServerState(advertisedVersion: options.advertisedVersion)
 do {
-    let listener = try await Listener(port: options.port, state: state)
-    print("HeidrunTestServer listening on 127.0.0.1:\(options.port)")
+    let server = try TestServerInstance.startFixed(
+        port: options.port,
+        state: ServerState(advertisedVersion: options.advertisedVersion)
+    )
+    print("HeidrunTestServer listening on 127.0.0.1:\(server.controlPort)")
+    print("Transfer side-channel on 127.0.0.1:\(server.transferPort)")
     print("Advertising server version \(options.advertisedVersion) " +
           "(\(options.advertisedVersion >= 151 ? "threaded news" : "plain news") UI)")
-    try await listener.run()
+
+    // Block forever — Ctrl-C to quit.
+    try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
+    _ = server
 } catch {
     print("Failed to start: \(error)")
     exit(1)

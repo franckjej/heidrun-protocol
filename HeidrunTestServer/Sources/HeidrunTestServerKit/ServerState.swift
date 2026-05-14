@@ -6,17 +6,29 @@ import HeidrunCore
 /// Heidrun's test server is a single-process toy — one actor holds every
 /// piece of mutable state and serialises access. Concurrent clients
 /// drive the actor with await, no locks of our own.
-actor ServerState {
+public actor ServerState {
     /// Server version we advertise in the login reply. The client maps
     /// `< 151` → plain-only news UI, `>= 151` → threaded news UI.
-    let advertisedVersion: UInt16
+    public let advertisedVersion: UInt16
 
     /// Newest-first list of plain-news posts. `getNewsList` joins these
     /// with "\r" separators (Hotline convention).
-    private(set) var plainPosts: [String] = []
+    public private(set) var plainPosts: [String] = []
 
     /// Threaded-news fixture tree (folders/categories/posts).
     private(set) var threaded: [BundleNode]
+
+    /// In-memory file system the file-transfer transactions read from
+    /// and write to. The HTXF side channel keys into `pendingTransfers`
+    /// to know what each connecting transfer port is for.
+    public let vfs: VFS
+
+    /// Side-channel transfers the control channel has authorised but
+    /// the HTXF listener hasn't seen yet.
+    private var pendingTransfers: [UInt32: PendingTransfer] = [:]
+
+    /// Monotonic transfer id counter. Shared across downloads/uploads.
+    private var nextTransferID: UInt32 = 1
 
     /// Connected users, keyed by socket.
     private var users: [UInt16: User] = [:]
@@ -27,10 +39,11 @@ actor ServerState {
 
     private var nextSocket: UInt16 = 100
 
-    init(advertisedVersion: UInt16) {
+    public init(advertisedVersion: UInt16, vfs: VFS = FileFixtures.makeRoot()) {
         self.advertisedVersion = advertisedVersion
         self.plainPosts = [NewsFixtures.initialPlainFeed]
         self.threaded = NewsFixtures.bundleTree
+        self.vfs = vfs
     }
 
     // MARK: - Connection lifecycle
@@ -94,5 +107,21 @@ actor ServerState {
         for sink in sinks {
             await sink(packet)
         }
+    }
+
+    // MARK: - Pending transfers
+
+    /// Register a pending transfer and return the new transfer id.
+    public func registerTransfer(_ transfer: PendingTransfer) -> UInt32 {
+        let id = nextTransferID
+        nextTransferID &+= 1
+        pendingTransfers[id] = transfer
+        return id
+    }
+
+    /// Look up (and remove) a pending transfer by id. The side channel
+    /// "consumes" the registration once it starts handling it.
+    public func takeTransfer(id: UInt32) -> PendingTransfer? {
+        pendingTransfers.removeValue(forKey: id)
     }
 }

@@ -109,6 +109,20 @@ final class Connection: @unchecked Sendable {
             try await handleGetThread(header: header, fields: fields)
         case 410:   // post threaded news (no-reply on the client side)
             try await handlePostThread(header: header, fields: fields)
+        case 200:   // list files
+            try await handleListFiles(header: header, fields: fields)
+        case 202:   // download file
+            try await handleDownloadFile(header: header, fields: fields)
+        case 203:   // upload file
+            try await handleUploadFile(header: header, fields: fields)
+        case 204:   // delete entry
+            try await handleDeleteEntry(header: header, fields: fields)
+        case 205:   // create folder
+            try await handleCreateFolder(header: header, fields: fields)
+        case 206:   // get file info
+            try await handleFileInfo(header: header, fields: fields)
+        case 207:   // set file info (rename or comment)
+            try await handleSetFileInfo(header: header, fields: fields)
         default:
             // Unknown — respond with empty success so the client doesn't
             // stall on a missing handler.
@@ -138,7 +152,7 @@ final class Connection: @unchecked Sendable {
 
         // Reply with our advertised version so the client picks the
         // right news capability.
-        let version = await state.advertisedVersion
+        let version = state.advertisedVersion
         try await reply(
             header: header,
             fields: [
@@ -292,12 +306,138 @@ final class Connection: @unchecked Sendable {
         )
     }
 
+    // MARK: - File system
+
+    private func handleListFiles(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let listing = state.vfs.list(at: path) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        let entries = listing.map { FileEncoders.fileListEntry($0, encoding: encoding) }
+        try await reply(header: header, fields: entries)
+    }
+
+    private func handleDownloadFile(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        guard let bytes = state.vfs.bytes(at: path, name: name) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        var offset: UInt32 = 0
+        if let resumeField = fields.first(.fileResumeInfo),
+           let info = ResumeInfoCodec.decode(resumeField.data) {
+            offset = info.dataForkOffset
+        }
+        let remaining = UInt32(clamping: max(0, bytes.count - Int(offset)))
+        let transferID = await state.registerTransfer(
+            .download(path: path, name: name, dataForkOffset: offset)
+        )
+        try await reply(
+            header: header,
+            fields: [
+                .uint32(.transferID, transferID),
+                .uint32(.transferSize, remaining)
+            ]
+        )
+    }
+
+    private func handleUploadFile(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        let declaredSize = fields.uint32(.transferSize) ?? 0
+        let resume = (fields.uint16(.parameter) ?? 0) == 1
+        let transferID = await state.registerTransfer(
+            .upload(path: path, name: name, size: declaredSize, resume: resume)
+        )
+        try await reply(
+            header: header,
+            fields: [.uint32(.transferID, transferID)]
+        )
+    }
+
+    private func handleDeleteEntry(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        let ok = state.vfs.delete(at: path, name: name)
+        try await reply(header: header, errorID: ok ? 0 : 1)
+    }
+
+    private func handleCreateFolder(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        let ok = state.vfs.createFolder(at: path, name: name)
+        try await reply(header: header, errorID: ok ? 0 : 1)
+    }
+
+    private func handleFileInfo(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        guard let (entry, meta) = state.vfs.info(at: path, name: name) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        var out: [PacketField] = [
+            PacketField.string(.fileName, entry.name, encoding: encoding),
+            PacketField(key: .longFileType, data: FileEncoders.longFourCC(entry.type)),
+            PacketField(key: .longFileCreator, data: FileEncoders.longFourCC(entry.creator)),
+            .uint32(.fileSize, entry.size),
+            FileEncoders.dateField(meta.created, key: .fileCreationDate),
+            FileEncoders.dateField(meta.modified, key: .fileModificationDate)
+        ]
+        if !meta.comment.isEmpty {
+            out.append(.string(.fileComment, meta.comment, encoding: encoding))
+        }
+        try await reply(header: header, fields: out)
+    }
+
+    private func handleSetFileInfo(header: PacketHeader, fields: [PacketField]) async throws {
+        let path = decodeFilePath(from: fields)
+        guard let name = fields.string(.fileName, encoding: encoding) else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        if let newName = fields.string(.fileRename, encoding: encoding), !newName.isEmpty {
+            let ok = state.vfs.rename(at: path, from: name, to: newName)
+            try await reply(header: header, errorID: ok ? 0 : 1)
+            return
+        }
+        if let comment = fields.string(.fileComment, encoding: encoding) {
+            let ok = state.vfs.setComment(at: path, name: name, comment: comment)
+            try await reply(header: header, errorID: ok ? 0 : 1)
+            return
+        }
+        try await reply(header: header)
+    }
+
     // MARK: - Helpers
 
-    /// Decode the `newsPath` (325) field into a list of components.
-    private func decodeNewsPath(from fields: [PacketField]) -> [String] {
-        guard let field = fields.first(.newsPath), field.data.count >= 2 else { return [] }
-        let data = field.data
+    /// Decode the `filePath` (202) field into a list of components.
+    private func decodeFilePath(from fields: [PacketField]) -> [String] {
+        guard let field = fields.first(.filePath), field.data.count >= 2 else { return [] }
+        return decodeNamePath(field.data)
+    }
+
+    /// Shared decoder for the `RemotePath` wire format used by both
+    /// `filePath` (202) and `newsPath` (325): UInt16 component count,
+    /// per-component (UInt16 0 pad, UInt8 length, name bytes).
+    private func decodeNamePath(_ data: Data) -> [String] {
         var cursor = 0
         func readUInt16BE() -> UInt16? {
             guard cursor + 2 <= data.count else { return nil }
@@ -322,6 +462,12 @@ final class Connection: @unchecked Sendable {
             components.append(name)
         }
         return components
+    }
+
+    /// Decode the `newsPath` (325) field into a list of components.
+    private func decodeNewsPath(from fields: [PacketField]) -> [String] {
+        guard let field = fields.first(.newsPath), field.data.count >= 2 else { return [] }
+        return decodeNamePath(field.data)
     }
 
     /// Send a server-to-client reply with the same task number the client

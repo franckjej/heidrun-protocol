@@ -371,7 +371,7 @@ extension HotlineNetworkClient {
                     continuation.finish(throwing: HotlineError.notConnected)
                     return
                 }
-                let encoding = await self.stringEncoding
+                let encoding = self.stringEncoding
                 await FolderDownloadDecoder.drive(
                     actor: actor,
                     encoding: encoding,
