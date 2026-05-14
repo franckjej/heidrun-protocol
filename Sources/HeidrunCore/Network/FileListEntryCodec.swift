@@ -21,16 +21,29 @@ public enum FileListEntryCodec {
         var cursor = ByteCursor(data: data)
         let typeBytes    = cursor.readData(count: 4)
         let creatorBytes = cursor.readData(count: 4)
-        let size: UInt32 = cursor.readBigEndian()
-        let itemCount: UInt32 = cursor.readBigEndian()
+        var size: UInt32 = cursor.readBigEndian()
+        var itemCount: UInt32 = cursor.readBigEndian()
         let nameLength: UInt32 = cursor.readBigEndian()
         guard cursor.remaining >= Int(nameLength) else { return nil }
         let nameBytes = cursor.readData(count: Int(nameLength))
         let name = String(data: nameBytes, encoding: encoding) ?? ""
 
+        let type = fourCharCode(from: typeBytes)
+        // The legacy `hotFileList` struct exposes `size` and `nrItems`
+        // as two separate UInt32s. Real Hotline 1.x servers pack a
+        // folder's child count into the `size` slot and leave the
+        // `nrItems` slot at 0 (production servers only fill one). Our
+        // own test server fills the other slot. Normalize to a single
+        // invariant — for folders, `itemCount` always carries the
+        // count, regardless of which slot the server used.
+        if type == .folder && itemCount == 0 && size > 0 {
+            itemCount = size
+            size = 0
+        }
+
         return RemoteFile(
             name: name,
-            type: fourCharCode(from: typeBytes),
+            type: type,
             creator: fourCharCode(from: creatorBytes),
             size: size,
             itemCount: itemCount
