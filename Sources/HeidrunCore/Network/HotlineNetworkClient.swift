@@ -386,6 +386,12 @@ public actor HotlineNetworkClient: HotlineClient {
         if let server = reply.uint16(.clientVersion) {
             self.serverVersion = Int(server)
         }
+        // Servers that follow the original Hotline convention echo the
+        // socket id they just allocated for us. Stash it so the host
+        // can label its own messages and skip its own self-echoes.
+        if let socket = reply.uint16(.socket) {
+            self.connectionSocket = socket
+        }
         // Start the heartbeat now that the server has authenticated us.
         // Pre-login pings would either be ignored or treated as a
         // protocol violation depending on the server.

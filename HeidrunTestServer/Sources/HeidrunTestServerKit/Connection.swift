@@ -15,6 +15,15 @@ final class Connection: @unchecked Sendable {
     private var nickname: String = ""
     private var icon: UInt16 = 1
     private let encoding: String.Encoding = .macOSRoman
+    /// Last time we observed any inbound activity from the peer
+    /// (handshake byte, transaction packet, ping). Used as a liveness
+    /// signal by the idle-timeout watcher.
+    private var lastInboundAt: ContinuousClock.Instant = .now
+
+    /// How long the connection can sit silent before the idle watcher
+    /// kills it. The client's keepalive ping fires every 30s, so 90s
+    /// gives three windows of grace before we declare the link dead.
+    private static let idleTimeout: Duration = .seconds(90)
 
     init(connection: NWConnection, state: ServerState, queue: DispatchQueue) {
         self.connection = connection
@@ -23,6 +32,9 @@ final class Connection: @unchecked Sendable {
     }
 
     func run() async {
+        let idleWatcher = startIdleWatcher()
+        defer { idleWatcher.cancel() }
+
         do {
             try await connection.startAndWaitForReady(on: queue)
             try await handshake()
@@ -31,10 +43,39 @@ final class Connection: @unchecked Sendable {
             print("[conn \(socketID)] closed: \(error)")
         }
         if socketID != 0 {
+            // Drop our own push sink BEFORE we broadcast 302 / 118 so
+            // `state.broadcast` doesn't try to send to our half-closed
+            // NWConnection. A cancelled NWConnection's send completion
+            // can take a long time (or never fire), which would stall
+            // the for-await loop and starve every other client of the
+            // departure notification.
+            await state.unregister(socket: socketID)
             await announceUserLeft(socket: socketID)
+            await evictFromPrivateChats()
+        } else {
+            await state.unregister(socket: socketID)
         }
-        await state.unregister(socket: socketID)
         connection.cancel()
+    }
+
+    /// On disconnect: drop this socket from every private chat it was
+    /// in and notify the remaining members so their participant lists
+    /// stay accurate. Mirrors a real Hotline server's behaviour when a
+    /// user drops mid-conversation.
+    private func evictFromPrivateChats() async {
+        let evictions = await state.evictFromAllPrivateChats(socket: socketID)
+        for (chatID, remaining) in evictions {
+            let push = PacketCodec.encode(
+                classID: 0,
+                transactionID: 118,
+                taskNumber: 0,
+                fields: [
+                    PacketField(key: .chatReference, data: ChatID(rawValue: chatID).data),
+                    PacketField.uint16(.socket, socketID)
+                ]
+            )
+            await state.push(to: remaining, packet: push)
+        }
     }
 
     // MARK: - Handshake
@@ -56,11 +97,31 @@ final class Connection: @unchecked Sendable {
         ]))
     }
 
+    /// Background watcher that closes the NWConnection once `lastInboundAt`
+    /// drifts past `idleTimeout` ago. Cancelling the connection unblocks
+    /// the read loop with `.notConnected`, which feeds the normal cleanup
+    /// path in `run()`.
+    private func startIdleWatcher() -> Task<Void, Never> {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard let self else { return }
+                let elapsed = ContinuousClock.now - self.lastInboundAt
+                if elapsed > Self.idleTimeout {
+                    print("[conn \(self.socketID)] idle for \(elapsed) — closing")
+                    self.connection.cancel()
+                    return
+                }
+            }
+        }
+    }
+
     // MARK: - Read loop
 
     private func readLoop() async throws {
         while true {
             let headerBytes = try await connection.receiveExactly(PacketHeader.byteCount)
+            lastInboundAt = .now
             guard let header = PacketHeader(decoding: headerBytes) else {
                 throw NSError(domain: "TestServer", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "short header"
@@ -98,6 +159,21 @@ final class Connection: @unchecked Sendable {
             await handleNicknameChange(fields: fields)
         case 105:   // chat (client → server send; server pushes back as 106)
             try await handleChat(header: header, fields: fields)
+        case 108:   // sendInstantMessage (private message)
+            try await handlePrivateMessage(header: header, fields: fields)
+        case 112:   // createPrivateChat (expects reply with chatReference)
+            try await handleCreatePrivateChat(header: header, fields: fields)
+        case 113:   // invite (no reply)
+            await handleInviteToPrivateChat(fields: fields)
+        case 114:   // rejectPrivateChat (no reply)
+            // Nothing to track — invitations aren't held server-side.
+            break
+        case 115:   // joinPrivateChat (no reply)
+            await handleJoinPrivateChat(fields: fields)
+        case 116:   // leavePrivateChat (no reply)
+            await handleLeavePrivateChat(fields: fields)
+        case 120:   // changeChatSubject (no reply)
+            await handleChangePrivateChatSubject(fields: fields)
         case 500:   // 185-style ping
             try await reply(header: header)
         case 101:   // get news list (plain)
@@ -154,12 +230,15 @@ final class Connection: @unchecked Sendable {
         )
 
         // Reply with our advertised version so the client picks the
-        // right news capability.
+        // right news capability and the socket id we just allocated so
+        // the client knows who it is on the server (used to label its
+        // own messages and to ignore self-echoes).
         let version = state.advertisedVersion
         try await reply(
             header: header,
             fields: [
                 PacketField.uint16(.clientVersion, version),
+                PacketField.uint16(.socket, self.socketID),
                 PacketField.string(.serverName, "Heidrun Test Server", encoding: encoding)
             ]
         )
@@ -169,6 +248,29 @@ final class Connection: @unchecked Sendable {
         // line. Real Hotline servers push transID 301 (`userChanged`)
         // on login, and 302 (`userLeft`) on disconnect.
         await announceUserChanged()
+
+        // Real Hotline servers push the agreement (transID 109) right
+        // after the login reply. Skipped when the server has none
+        // configured, matching servers that don't bother with one.
+        if let agreement = state.agreement {
+            await pushAgreement(agreement)
+        }
+    }
+
+    /// Push transID 109 (`agreement`) with the server's banner text.
+    /// `autoAgree` stays at 0; the client UI still asks the user to
+    /// confirm before sending the agree (transID 121) back.
+    private func pushAgreement(_ text: String) async {
+        let packet = PacketCodec.encode(
+            classID: 0,
+            transactionID: 109,
+            taskNumber: 0,
+            fields: [
+                PacketField.string(.message, text, encoding: encoding),
+                PacketField.uint16(.autoAgree, 0)
+            ]
+        )
+        try? await connection.sendAsync(packet)
     }
 
     /// Push a transID 301 (`userChanged`) packet describing the current
@@ -239,20 +341,187 @@ final class Connection: @unchecked Sendable {
         await announceUserChanged()
     }
 
+    /// Forward a private message (transID 108) to the addressed socket
+    /// as an `InfoTransaction.message` (104) push, mirroring the way
+    /// real Hotline servers relay PMs. The sender's socket is encoded
+    /// in the push so the recipient can route it into the right thread.
+    private func handlePrivateMessage(header: PacketHeader, fields: [PacketField]) async throws {
+        let target = fields.uint16(.socket) ?? 0
+        guard let body = fields.string(.message, encoding: encoding), target != 0 else {
+            try await reply(header: header, errorID: 1)
+            return
+        }
+        let push = PacketCodec.encode(
+            classID: 0,
+            transactionID: 104,  // kInfoMsg
+            taskNumber: 0,
+            fields: [
+                PacketField.uint16(.socket, socketID),
+                PacketField.string(.message, body, encoding: encoding)
+            ]
+        )
+        let delivered = await state.push(to: target, packet: push)
+        try await reply(header: header, errorID: delivered ? 0 : 1)
+    }
+
     private func handleChat(header: PacketHeader, fields: [PacketField]) async throws {
         guard let body = fields.string(.message, encoding: encoding) else {
             try await reply(header: header)
             return
         }
         let line = " \(nickname): \(body)\r"
+        let isAction = (fields.uint16(.parameter) ?? 0) != 0
+        var pushFields: [PacketField] = [
+            PacketField.string(.message, line, encoding: encoding),
+            PacketField.uint16(.parameter, isAction ? 1 : 0)
+        ]
+        // Scope to the addressed room when present, otherwise broadcast
+        // to the public chat. The chatReference round-trips so the
+        // client can route the line into the right ChatViewModel.
+        let chatRef = fields.first(.chatReference)
+        if let chatRef {
+            pushFields.append(chatRef)
+        }
         let push = PacketCodec.encode(
             classID: 0,
             transactionID: 106,  // kInfoChat
             taskNumber: 0,
-            fields: [PacketField.string(.message, line, encoding: encoding)]
+            fields: pushFields
         )
-        await state.broadcast(push)
+        if let chatRef {
+            let chatID = ChatID(data: chatRef.data).rawValue
+            let members = await state.privateChatMembers(chatID)
+            await state.push(to: members, packet: push)
+        } else {
+            await state.broadcast(push)
+        }
         try await reply(header: header)
+    }
+
+    // MARK: - Private chat rooms
+
+    /// `createPrivateChat` (transID 112): allocate a fresh room, push
+    /// an invitation (transID 113) to the addressed user, and reply
+    /// with the chatReference so the creator can join their own room.
+    private func handleCreatePrivateChat(header: PacketHeader, fields: [PacketField]) async throws {
+        let target = fields.uint16(.socket) ?? 0
+        let chatID = await state.createPrivateChat(creator: socketID)
+        let chatRefData = ChatID(rawValue: chatID).data
+        if target != 0 {
+            let invitation = PacketCodec.encode(
+                classID: 0,
+                transactionID: 113,  // kInfoInvitation
+                taskNumber: 0,
+                fields: [
+                    PacketField(key: .chatReference, data: chatRefData),
+                    PacketField.uint16(.socket, socketID),
+                    PacketField.string(.message, "\(nickname) invites you to chat", encoding: encoding)
+                ]
+            )
+            await state.push(to: target, packet: invitation)
+        }
+        try await reply(
+            header: header,
+            fields: [PacketField(key: .chatReference, data: chatRefData)]
+        )
+    }
+
+    /// `invite` (transID 113): push an invitation to the target socket
+    /// for an existing chat. Mirrors `createPrivateChat` but reuses an
+    /// already-allocated room.
+    private func handleInviteToPrivateChat(fields: [PacketField]) async {
+        let target = fields.uint16(.socket) ?? 0
+        guard let ref = fields.first(.chatReference), target != 0 else { return }
+        let invitation = PacketCodec.encode(
+            classID: 0,
+            transactionID: 113,
+            taskNumber: 0,
+            fields: [
+                ref,
+                PacketField.uint16(.socket, socketID),
+                PacketField.string(.message, "\(nickname) invites you to chat", encoding: encoding)
+            ]
+        )
+        await state.push(to: target, packet: invitation)
+    }
+
+    /// `joinPrivateChat` (transID 115): add this connection to the
+    /// room, push a `privateChatJoined` (117) for every existing member
+    /// to the joiner so they populate their roster, then push a
+    /// matching 117 carrying the joiner to every other member so their
+    /// rosters update in turn.
+    private func handleJoinPrivateChat(fields: [PacketField]) async {
+        guard let ref = fields.first(.chatReference) else { return }
+        let chatID = ChatID(data: ref.data).rawValue
+        let existing = await state.privateChatMembers(chatID).subtracting([socketID])
+        await state.joinPrivateChat(chatID, socket: socketID)
+        let users = await state.connectedUsers
+        // Hydrate the joiner's roster.
+        for socket in existing {
+            guard let user = users.first(where: { $0.socket == socket }) else { continue }
+            let push = PacketCodec.encode(
+                classID: 0,
+                transactionID: 117,
+                taskNumber: 0,
+                fields: [
+                    ref,
+                    Encoders.userListEntry(user, encoding: encoding)
+                ]
+            )
+            await state.push(to: socketID, packet: push)
+        }
+        // Notify everyone else that the joiner has arrived.
+        if let me = users.first(where: { $0.socket == socketID }) {
+            let push = PacketCodec.encode(
+                classID: 0,
+                transactionID: 117,
+                taskNumber: 0,
+                fields: [
+                    ref,
+                    Encoders.userListEntry(me, encoding: encoding)
+                ]
+            )
+            await state.push(to: existing, packet: push)
+        }
+    }
+
+    /// `leavePrivateChat` (transID 116): drop membership and tell the
+    /// remaining members so their participant lists stay accurate.
+    private func handleLeavePrivateChat(fields: [PacketField]) async {
+        guard let ref = fields.first(.chatReference) else { return }
+        let chatID = ChatID(data: ref.data).rawValue
+        let remaining = await state.privateChatMembers(chatID).subtracting([socketID])
+        await state.leavePrivateChat(chatID, socket: socketID)
+        let push = PacketCodec.encode(
+            classID: 0,
+            transactionID: 118,
+            taskNumber: 0,
+            fields: [
+                ref,
+                PacketField.uint16(.socket, socketID)
+            ]
+        )
+        await state.push(to: remaining, packet: push)
+    }
+
+    /// `changeChatSubject` (transID 120): update the room's subject
+    /// and push a notification (119) to everyone currently in it.
+    private func handleChangePrivateChatSubject(fields: [PacketField]) async {
+        guard let ref = fields.first(.chatReference) else { return }
+        let chatID = ChatID(data: ref.data).rawValue
+        let subject = fields.string(.chatSubject, encoding: encoding) ?? ""
+        await state.setPrivateChatSubject(chatID, subject: subject)
+        let push = PacketCodec.encode(
+            classID: 0,
+            transactionID: 119,
+            taskNumber: 0,
+            fields: [
+                ref,
+                PacketField.string(.chatSubject, subject, encoding: encoding)
+            ]
+        )
+        let members = await state.privateChatMembers(chatID)
+        await state.push(to: members, packet: push)
     }
 
     // MARK: News — plain

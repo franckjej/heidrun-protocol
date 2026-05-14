@@ -94,6 +94,11 @@ public final class TestServerInstance: @unchecked Sendable {
     }
 
     /// Build (but do not start) a listener pair on `port` and `port+1`.
+    /// TCP keepalive is enabled on accepted connections so a client
+    /// that vanishes without a FIN (process killed, network drop,
+    /// laptop slept) gets RST'd at the OS level and the read loop
+    /// throws — otherwise the connection would sit forever as a ghost
+    /// in the user list.
     private static func bindPair(port: UInt16) throws -> (control: NWListener, transfer: NWListener) {
         guard let cp = NWEndpoint.Port(rawValue: port),
               let tp = NWEndpoint.Port(rawValue: port &+ 1) else {
@@ -101,8 +106,20 @@ public final class TestServerInstance: @unchecked Sendable {
                 NSLocalizedDescriptionKey: "invalid port \(port)"
             ])
         }
-        let control = try NWListener(using: .tcp, on: cp)
-        let transfer = try NWListener(using: .tcp, on: tp)
+        let control = try NWListener(using: keepaliveParameters(), on: cp)
+        let transfer = try NWListener(using: keepaliveParameters(), on: tp)
         return (control, transfer)
+    }
+
+    /// `NWParameters` for a TCP listener with keepalive enabled. The
+    /// idle / interval / count match what the client uses on its
+    /// outbound side (see `HotlineNetworkClient.connect`).
+    private static func keepaliveParameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        tcp.keepaliveInterval = 10
+        tcp.keepaliveCount = 3
+        return NWParameters(tls: nil, tcp: tcp)
     }
 }

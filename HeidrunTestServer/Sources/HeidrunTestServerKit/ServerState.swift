@@ -1,6 +1,14 @@
 import Foundation
 import HeidrunCore
 
+/// One open private-chat room. Membership is just a set of sockets;
+/// when the last member leaves the chat is dropped.
+struct PrivateChat: Sendable {
+    let id: UInt32
+    var members: Set<UInt16>
+    var subject: String = ""
+}
+
 /// Shared, mutable state across all connected clients.
 ///
 /// Heidrun's test server is a single-process toy — one actor holds every
@@ -10,6 +18,11 @@ public actor ServerState {
     /// Server version we advertise in the login reply. The client maps
     /// `< 151` → plain-only news UI, `>= 151` → threaded news UI.
     public let advertisedVersion: UInt16
+
+    /// Agreement banner pushed to each client right after a successful
+    /// login (transID 109). `nil` skips the push, mirroring servers that
+    /// don't bother with one.
+    public let agreement: String?
 
     /// Newest-first list of plain-news posts. `getNewsList` joins these
     /// with "\r" separators (Hotline convention).
@@ -37,14 +50,36 @@ public actor ServerState {
     /// connected user should see a `kInfoNewPost` push.
     private var pushSinks: [UInt16: @Sendable (Data) async -> Void] = [:]
 
+    /// Open private-chat rooms keyed by their server-assigned id. The
+    /// id is the same value the client sees in the 4-byte chatReference
+    /// field of every related transaction.
+    private var privateChats: [UInt32: PrivateChat] = [:]
+
+    /// Monotonic id source for private chats. Starts at a value the
+    /// real Hotline servers historically used so logs are easy to spot.
+    private var nextChatID: UInt32 = 0x1000_0001
+
     private var nextSocket: UInt16 = 100
 
-    public init(advertisedVersion: UInt16, vfs: VFS = FileFixtures.makeRoot()) {
+    public init(
+        advertisedVersion: UInt16,
+        agreement: String? = ServerState.defaultAgreement,
+        vfs: VFS = FileFixtures.makeRoot()
+    ) {
         self.advertisedVersion = advertisedVersion
+        self.agreement = agreement
         self.plainPosts = [NewsFixtures.initialPlainFeed]
         self.threaded = NewsFixtures.bundleTree
         self.vfs = vfs
     }
+
+    public static let defaultAgreement: String = """
+    Welcome to the Heidrun Test Server.
+
+    By connecting you agree to behave nicely while exercising the wire \
+    protocol. This banner is fake — it exists only so the client's \
+    agreement sheet has something to display.
+    """
 
     // MARK: - Connection lifecycle
 
@@ -107,6 +142,89 @@ public actor ServerState {
         for sink in sinks {
             await sink(packet)
         }
+    }
+
+    /// Push a packet to a single connected socket, if it's still
+    /// registered. Returns `true` when the recipient was found.
+    @discardableResult
+    func push(to socket: UInt16, packet: Data) async -> Bool {
+        guard let sink = pushSinks[socket] else { return false }
+        await sink(packet)
+        return true
+    }
+
+    /// Push a packet to every socket in `sockets` that's still
+    /// registered. Sockets that have left are silently skipped.
+    func push(to sockets: some Sequence<UInt16>, packet: Data) async {
+        for socket in sockets {
+            await push(to: socket, packet: packet)
+        }
+    }
+
+    // MARK: - Private chats
+
+    /// Allocate a new private-chat room with `creator` as the only
+    /// initial member and return the chat id. The id slot lives until
+    /// the last member leaves.
+    func createPrivateChat(creator: UInt16) -> UInt32 {
+        let id = nextChatID
+        nextChatID &+= 1
+        privateChats[id] = PrivateChat(id: id, members: [creator])
+        return id
+    }
+
+    /// Add `socket` to an existing chat. Returns `false` when the chat
+    /// id isn't known.
+    @discardableResult
+    func joinPrivateChat(_ id: UInt32, socket: UInt16) -> Bool {
+        guard var chat = privateChats[id] else { return false }
+        chat.members.insert(socket)
+        privateChats[id] = chat
+        return true
+    }
+
+    /// Remove `socket` from `id`. Drops the chat entirely once the last
+    /// member leaves so id slots get reclaimed.
+    func leavePrivateChat(_ id: UInt32, socket: UInt16) {
+        guard var chat = privateChats[id] else { return }
+        chat.members.remove(socket)
+        if chat.members.isEmpty {
+            privateChats[id] = nil
+        } else {
+            privateChats[id] = chat
+        }
+    }
+
+    /// Replace the subject. No-op when the chat id isn't known.
+    func setPrivateChatSubject(_ id: UInt32, subject: String) {
+        guard var chat = privateChats[id] else { return }
+        chat.subject = subject
+        privateChats[id] = chat
+    }
+
+    /// Snapshot of one chat's members. Empty when the chat id isn't
+    /// known so callers can treat unknown chats as silently dropped.
+    func privateChatMembers(_ id: UInt32) -> Set<UInt16> {
+        privateChats[id]?.members ?? []
+    }
+
+    /// Drop `socket` from every private chat it belonged to. Returns
+    /// the (chatID, remaining members) pairs the caller still needs to
+    /// notify with a `privateChatLeft` push so participant lists update
+    /// across the surviving members.
+    func evictFromAllPrivateChats(socket: UInt16) -> [(id: UInt32, remaining: Set<UInt16>)] {
+        var notifications: [(id: UInt32, remaining: Set<UInt16>)] = []
+        for (id, chat) in privateChats where chat.members.contains(socket) {
+            var updated = chat
+            updated.members.remove(socket)
+            if updated.members.isEmpty {
+                privateChats[id] = nil
+            } else {
+                privateChats[id] = updated
+                notifications.append((id, updated.members))
+            }
+        }
+        return notifications
     }
 
     // MARK: - Pending transfers
