@@ -36,6 +36,8 @@ struct PartialDownloadMetadataTests {
             totalSize: 42
         )
         #expect(metadata.serverAddress == "h.example.org")
+        #expect(metadata.serverPort == 5500)
+        #expect(metadata.serverLogin == "anon")
         #expect(metadata.serverName == "Example")
         #expect(metadata.remoteFileName == "foo.bin")
         #expect(metadata.totalSize == 42)
