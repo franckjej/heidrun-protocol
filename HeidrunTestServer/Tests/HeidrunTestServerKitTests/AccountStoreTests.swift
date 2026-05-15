@@ -183,3 +183,41 @@ struct AccountStoreSnapshotTests {
         #expect(await secondStore.get("admin") == seed)
     }
 }
+
+@Suite("ServerState admin helpers")
+struct ServerStateAdminHelperTests {
+    @Test("default ServerState init exposes an in-memory store with a default admin seed")
+    func defaultSeedAvailable() async {
+        let state = ServerState(advertisedVersion: 185)
+        let admin = await state.accounts.get("admin")
+        #expect(admin?.login == "admin")
+        #expect(admin?.password == "admin")
+        #expect(admin?.privileges.contains(.canBroadcast) == true)
+    }
+
+    @Test("adminCreate / adminModify / adminDelete proxy the store")
+    func helpersRoundTrip() async throws {
+        let store = await AccountStore(snapshotURL: nil)
+        let state = ServerState(advertisedVersion: 185, accounts: store)
+
+        try await state.adminCreate(ServerAccount(
+            login: "carol",
+            password: "pw",
+            nickname: "Carol",
+            privileges: [.readChat]
+        ))
+        let opened = await state.adminOpen(login: "carol")
+        #expect(opened?.nickname == "Carol")
+
+        try await state.adminModify(
+            login: "carol",
+            password: nil,
+            nickname: "Caroline",
+            privileges: [.readChat, .sendChat]
+        )
+        #expect(await state.adminOpen(login: "carol")?.nickname == "Caroline")
+
+        try await state.adminDelete(login: "carol")
+        #expect(await state.adminOpen(login: "carol") == nil)
+    }
+}

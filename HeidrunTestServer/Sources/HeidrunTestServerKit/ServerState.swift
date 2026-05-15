@@ -36,6 +36,10 @@ public actor ServerState {
     /// to know what each connecting transfer port is for.
     public let vfs: VFS
 
+    /// Admin-managed account roster. Consulted by login (107) and
+    /// mutated by the admin transactions (350/351/352/353).
+    public let accounts: AccountStore
+
     /// Side-channel transfers the control channel has authorised but
     /// the HTXF listener hasn't seen yet.
     private var pendingTransfers: [UInt32: PendingTransfer] = [:]
@@ -64,14 +68,59 @@ public actor ServerState {
     public init(
         advertisedVersion: UInt16,
         agreement: String? = ServerState.defaultAgreement,
-        vfs: VFS = FileFixtures.makeRoot()
+        vfs: VFS = FileFixtures.makeRoot(),
+        accounts: AccountStore? = nil
     ) {
         self.advertisedVersion = advertisedVersion
         self.agreement = agreement
         self.plainPosts = [NewsFixtures.initialPlainFeed]
         self.threaded = NewsFixtures.bundleTree
         self.vfs = vfs
+        self.accounts = accounts ?? ServerState.makeDefaultAccountStore()
     }
+
+    private static func makeDefaultAccountStore() -> AccountStore {
+        // Synchronous wrapper — `AccountStore.init` is only async when a
+        // snapshot URL is supplied. For the default in-memory case the
+        // body never suspends, so a sync hop here is safe.
+        let seedAdmin = ServerAccount(
+            login: "admin",
+            password: "admin",
+            nickname: "Administrator",
+            privileges: ServerState.defaultAdminPrivileges
+        )
+        // Build the actor on the current thread without an await: the
+        // initializer for `AccountStore` with `snapshotURL: nil` doesn't
+        // perform any awaiting work, so this is a safe pattern under
+        // Swift 6's actor-init rules.
+        // `nonisolated(unsafe)` suppresses the Swift 6 data-race
+        // diagnostic: the DispatchSemaphore ensures write-before-read, so
+        // this is provably safe even though the compiler can't verify it.
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var store: AccountStore!
+        Task.detached {
+            store = await AccountStore(snapshotURL: nil, seeds: [seedAdmin])
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return store
+    }
+
+    /// All privilege bits the test server is willing to grant to a
+    /// default admin account. Mirrors a "give them everything we know
+    /// about" preset.
+    public static let defaultAdminPrivileges: UserPrivileges = [
+        .deleteFiles, .uploadFiles, .downloadFiles, .renameFiles, .moveFiles,
+        .createFolders, .deleteFolders, .renameFolders, .moveFolders,
+        .readChat, .sendChat, .initiatePrivateChat, .closePrivateChat,
+        .showInList, .createUser, .deleteUser, .readUser, .modifyUser,
+        .changeOwnPassword, .readNews, .postNews, .disconnectUsers,
+        .cannotBeDisconnected, .getUserInfo, .uploadAnywhere, .useAnyName,
+        .dontShowAgreement, .commentFiles, .commentFolders, .viewDropBoxes,
+        .makeAliases, .canBroadcast, .deleteArticles, .createCategories,
+        .deleteCategories, .createNewsBundles, .deleteNewsBundles,
+        .uploadFolders, .downloadFolders, .sendMessages
+    ]
 
     public static let defaultAgreement: String = """
     Welcome to the Heidrun Test Server.
@@ -241,5 +290,28 @@ public actor ServerState {
     /// "consumes" the registration once it starts handling it.
     public func takeTransfer(id: UInt32) -> PendingTransfer? {
         pendingTransfers.removeValue(forKey: id)
+    }
+
+    // MARK: - Admin helpers
+
+    public func adminCreate(_ account: ServerAccount) async throws {
+        try await accounts.create(account)
+    }
+
+    public func adminModify(
+        login: String,
+        password: String?,
+        nickname: String,
+        privileges: UserPrivileges
+    ) async throws {
+        try await accounts.modify(login: login, password: password, nickname: nickname, privileges: privileges)
+    }
+
+    public func adminDelete(login: String) async throws {
+        try await accounts.delete(login)
+    }
+
+    public func adminOpen(login: String) async -> ServerAccount? {
+        await accounts.get(login)
     }
 }
