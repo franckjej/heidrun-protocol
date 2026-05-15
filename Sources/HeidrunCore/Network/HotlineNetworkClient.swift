@@ -528,19 +528,23 @@ public actor HotlineNetworkClient: HotlineClient {
     // MARK: - Account administration
 
     public func createLogin(name: String, password: String, nickname: String, privileges: UserPrivileges) async throws {
-        // transID 350, no-reply, [login(105 obfusc), password(106 obfusc), nick(102), privs(110, 8 bytes)].
+        // transID 350, [login(105 obfusc), password(106 obfusc), nick(102), privs(110, 8 bytes)].
+        // Real Hotline servers reply with an error when the login already exists, so we await
+        // the reply so that server errors surface as thrown HotlineError values.
         let fields: [PacketField] = [
             .obfuscatedString(.login, name, encoding: stringEncoding),
             .obfuscatedString(.password, password, encoding: stringEncoding),
             .string(.nickname, nickname, encoding: stringEncoding),
             PacketField(key: .privileges, data: Data(privileges.bytes))
         ]
-        try await sendNoReply(transactionID: 350, fields: fields)
+        try await sendExpectingReply(transactionID: 350, fields: fields)
     }
 
     public func deleteLogin(_ name: String) async throws {
-        // transID 351, no-reply, [login(105 obfusc)].
-        try await sendNoReply(
+        // transID 351, [login(105 obfusc)].
+        // Real Hotline servers reply with an error when the login is not found, so we await
+        // the reply so that server errors surface as thrown HotlineError values.
+        try await sendExpectingReply(
             transactionID: 351,
             fields: [.obfuscatedString(.login, name, encoding: stringEncoding)]
         )
@@ -559,7 +563,8 @@ public actor HotlineNetworkClient: HotlineClient {
     }
 
     public func modifyLogin(name: String, password: String?, nickname: String, privileges: UserPrivileges) async throws {
-        // transID 353, no-reply.
+        // transID 353. Real Hotline servers reply with an error when the login is not found,
+        // so we await the reply so that server errors surface as thrown HotlineError values.
         // - nickname (102), login (105 obfusc) are always sent.
         // - password (106): omitted when nil; sent obfuscated when non-empty;
         //   sent as a single 0x00 byte for an empty new password (mirrors
@@ -577,7 +582,7 @@ public actor HotlineNetworkClient: HotlineClient {
             }
         }
         fields.append(PacketField(key: .privileges, data: Data(privileges.bytes)))
-        try await sendNoReply(transactionID: 353, fields: fields)
+        try await sendExpectingReply(transactionID: 353, fields: fields)
     }
 
     // MARK: - File system

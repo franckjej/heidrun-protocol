@@ -202,6 +202,14 @@ final class Connection: @unchecked Sendable {
             try await handleFileInfo(header: header, fields: fields)
         case 207:   // set file info (rename or comment)
             try await handleSetFileInfo(header: header, fields: fields)
+        case 350:   // createLogin
+            try await handleCreateLogin(header: header, fields: fields)
+        case 351:   // deleteLogin
+            try await handleDeleteLogin(header: header, fields: fields)
+        case 352:   // openLogin
+            try await handleOpenLogin(header: header, fields: fields)
+        case 353:   // modifyLogin
+            try await handleModifyLogin(header: header, fields: fields)
         default:
             // Unknown — respond with empty success so the client doesn't
             // stall on a missing handler.
@@ -737,6 +745,102 @@ final class Connection: @unchecked Sendable {
         try await reply(header: header)
     }
 
+    // MARK: - Account admin
+
+    private func handleCreateLogin(header: PacketHeader, fields: [PacketField]) async throws {
+        let login = obfuscatedString(.login, from: fields) ?? ""
+        let password = obfuscatedString(.password, from: fields) ?? ""
+        let nickname = fields.string(.nickname, encoding: encoding) ?? ""
+        let privileges = privilegesField(from: fields)
+        guard !login.isEmpty else {
+            try await reply(header: header, errorID: 1, errorMessage: "login required")
+            return
+        }
+        let account = ServerAccount(login: login, password: password, nickname: nickname, privileges: privileges)
+        do {
+            try await state.adminCreate(account)
+            try await reply(header: header)
+        } catch AccountStoreError.duplicate(let name) {
+            try await reply(header: header, errorID: 1, errorMessage: "account \(name) already exists")
+        }
+    }
+
+    private func handleDeleteLogin(header: PacketHeader, fields: [PacketField]) async throws {
+        let login = obfuscatedString(.login, from: fields) ?? ""
+        guard !login.isEmpty else {
+            try await reply(header: header, errorID: 1, errorMessage: "login required")
+            return
+        }
+        do {
+            try await state.adminDelete(login: login)
+            try await reply(header: header)
+        } catch AccountStoreError.missing(let name) {
+            try await reply(header: header, errorID: 1, errorMessage: "account \(name) not found")
+        }
+    }
+
+    private func handleOpenLogin(header: PacketHeader, fields: [PacketField]) async throws {
+        // The 352 transaction sends the login PLAIN (not obfuscated) —
+        // matches HEClient.m line 995 and our client at HotlineNetworkClient.swift:549.
+        let login = fields.string(.login, encoding: encoding) ?? ""
+        guard let account = await state.adminOpen(login: login) else {
+            try await reply(header: header, errorID: 1, errorMessage: "account not found")
+            return
+        }
+        try await reply(
+            header: header,
+            fields: [
+                .string(.nickname, account.nickname, encoding: encoding),
+                PacketField(key: .privileges, data: Data(account.privileges.bytes))
+            ]
+        )
+    }
+
+    private func handleModifyLogin(header: PacketHeader, fields: [PacketField]) async throws {
+        let login = obfuscatedString(.login, from: fields) ?? ""
+        let nickname = fields.string(.nickname, encoding: encoding) ?? ""
+        let privileges = privilegesField(from: fields)
+        let password = modifyPasswordField(from: fields)
+        guard !login.isEmpty else {
+            try await reply(header: header, errorID: 1, errorMessage: "login required")
+            return
+        }
+        do {
+            try await state.adminModify(login: login, password: password, nickname: nickname, privileges: privileges)
+            try await reply(header: header)
+        } catch AccountStoreError.missing(let name) {
+            try await reply(header: header, errorID: 1, errorMessage: "account \(name) not found")
+        }
+    }
+
+    /// Read an obfuscated string field (login / password): each byte is
+    /// XOR'd with `0xFF` on the wire; decoding inverts that.
+    private func obfuscatedString(_ key: HotlineObjectKey, from fields: [PacketField]) -> String? {
+        guard let field = fields.first(key) else { return nil }
+        var bytes = Array(field.data)
+        for index in bytes.indices {
+            bytes[index] ^= 0xFF
+        }
+        return String(data: Data(bytes), encoding: encoding)
+    }
+
+    private func privilegesField(from fields: [PacketField]) -> UserPrivileges {
+        guard let field = fields.first(.privileges) else { return [] }
+        return UserPrivileges(bytes: Array(field.data))
+    }
+
+    /// Mirror the client's `modifyLogin` password convention:
+    /// - missing field   → `nil` (keep existing)
+    /// - single 0x00     → `""` (clear)
+    /// - non-empty obfuscated string → that string
+    private func modifyPasswordField(from fields: [PacketField]) -> String? {
+        guard let field = fields.first(.password) else { return nil }
+        if field.data == Data([0x00]) {
+            return ""
+        }
+        return obfuscatedString(.password, from: fields)
+    }
+
     // MARK: - Helpers
 
     /// Decode the `filePath` (202) field into a list of components.
@@ -782,18 +886,25 @@ final class Connection: @unchecked Sendable {
     }
 
     /// Send a server-to-client reply with the same task number the client
-    /// used. `errorID == 1` is the standard Hotline failure marker.
+    /// used. `errorID == 1` is the standard Hotline failure marker; the
+    /// optional `errorMessage` is encoded as `.errorMessage` (key 100)
+    /// when supplied.
     private func reply(
         header: PacketHeader,
         errorID: UInt32 = 0,
+        errorMessage: String? = nil,
         fields: [PacketField] = []
     ) async throws {
+        var replyFields = fields
+        if let errorMessage {
+            replyFields.append(.string(.errorMessage, errorMessage, encoding: encoding))
+        }
         let packet = PacketCodec.encode(
             classID: 1,
             transactionID: header.transactionID,
             taskNumber: header.taskNumber,
             errorID: errorID,
-            fields: fields
+            fields: replyFields
         )
         try await connection.sendAsync(packet)
     }
