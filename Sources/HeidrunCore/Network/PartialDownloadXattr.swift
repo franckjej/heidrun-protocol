@@ -7,7 +7,7 @@ import Darwin
 /// `schemaVersion` is the read path's job (see
 /// `PartialDownloadMetadata.currentSchemaVersion`).
 public enum PartialDownloadXattr {
-    public static let attribute: String = "com.heidrun.resumeinfo"
+    static let attribute: String = "com.heidrun.resumeinfo"
 
     public static func write(_ metadata: PartialDownloadMetadata, to url: URL) throws {
         let encoder = JSONEncoder()

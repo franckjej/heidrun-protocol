@@ -60,6 +60,16 @@ struct PartialDownloadXattrTests {
         }
     }
 
+    @Test("remove on a file with no attribute does not throw")
+    func removeIdempotentOnUntouchedFile() throws {
+        let url = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // No write — the attribute was never set.
+        #expect(throws: Never.self) {
+            try PartialDownloadXattr.remove(from: url)
+        }
+    }
+
     @Test("read throws .malformedJSON when the attribute holds garbage")
     func readMalformedThrows() throws {
         let url = try temporaryFile()
@@ -76,6 +86,31 @@ struct PartialDownloadXattrTests {
             }
         }
         #expect(throws: PartialDownloadMetadataError.malformedJSON) {
+            _ = try PartialDownloadXattr.read(from: url)
+        }
+    }
+
+    @Test("read throws .unsupportedSchema when the blob carries a future schemaVersion")
+    func readUnsupportedSchemaThrows() throws {
+        let url = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        // Hand-craft a valid JSON blob with schemaVersion = 999 (current is 1).
+        let json = """
+            {"schemaVersion":999,"serverAddress":"x","serverPort":5500,\
+            "serverLogin":"x","serverName":"x","remotePath":[],\
+            "remoteFileName":"x","totalSize":0,"startedAt":"2023-11-14T22:13:20Z"}
+            """
+        let bytes = Array(json.utf8)
+        url.path.withCString { pathPointer in
+            PartialDownloadXattr.attribute.withCString { namePointer in
+                let result = bytes.withUnsafeBufferPointer { buffer in
+                    setxattr(pathPointer, namePointer, buffer.baseAddress, buffer.count, 0, 0)
+                }
+                #expect(result == 0)
+            }
+        }
+        #expect(throws: PartialDownloadMetadataError.unsupportedSchema(version: 999)) {
             _ = try PartialDownloadXattr.read(from: url)
         }
     }
