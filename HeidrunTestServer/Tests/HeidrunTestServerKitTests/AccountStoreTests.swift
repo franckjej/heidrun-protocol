@@ -31,6 +31,8 @@ struct ServerAccountTests {
         let encoded = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ServerAccount.self, from: encoded)
         #expect(decoded == original)
+        #expect(decoded.privilegesRaw == original.privilegesRaw)
+        #expect(decoded.privileges == original.privileges)
     }
 }
 
@@ -42,5 +44,14 @@ struct AccountStoreErrorTests {
         let missing = AccountStoreError.missing(login: "ghost")
         if case let .duplicate(name) = duplicate { #expect(name == "admin") } else { Issue.record("expected duplicate") }
         if case let .missing(name) = missing { #expect(name == "ghost") } else { Issue.record("expected missing") }
+    }
+
+    @Test("persistenceFailed equality includes the message")
+    func persistenceFailedEquality() {
+        let same = AccountStoreError.persistenceFailed(message: "disk full")
+        let other = AccountStoreError.persistenceFailed(message: "disk full")
+        let differentMessage = AccountStoreError.persistenceFailed(message: "disk full ")
+        #expect(same == other)
+        #expect(same != differentMessage)
     }
 }
