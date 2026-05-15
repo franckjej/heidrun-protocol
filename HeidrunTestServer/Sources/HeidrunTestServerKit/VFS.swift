@@ -75,12 +75,12 @@ public final class VFS: @unchecked Sendable {
             }
             .map { name, entry in
                 switch entry {
-                case .file(let f):
+                case .file(let file):
                     return RemoteFile(
                         name: name,
-                        type: f.type,
-                        creator: f.creator,
-                        size: UInt32(clamping: f.data.count)
+                        type: file.type,
+                        creator: file.creator,
+                        size: UInt32(clamping: file.data.count)
                     )
                 case .folder(let sub):
                     return RemoteFile(
@@ -99,15 +99,15 @@ public final class VFS: @unchecked Sendable {
         guard let folder = folder(at: path),
               let entry = folder.children[name] else { return nil }
         switch entry {
-        case .file(let f):
+        case .file(let file):
             return (
                 RemoteFile(
                     name: name,
-                    type: f.type,
-                    creator: f.creator,
-                    size: UInt32(clamping: f.data.count)
+                    type: file.type,
+                    creator: file.creator,
+                    size: UInt32(clamping: file.data.count)
                 ),
-                f
+                file
             )
         case .folder(let sub):
             return (
@@ -150,9 +150,9 @@ public final class VFS: @unchecked Sendable {
     @discardableResult
     public func setComment(at path: [String], name: String, comment: String) -> Bool {
         guard let parent = folder(at: path) else { return false }
-        guard case .file(var f) = parent.children[name] else { return false }
-        f.comment = comment
-        parent.children[name] = .file(f)
+        guard case .file(var file) = parent.children[name] else { return false }
+        file.comment = comment
+        parent.children[name] = .file(file)
         return true
     }
 
@@ -160,8 +160,8 @@ public final class VFS: @unchecked Sendable {
     /// names a folder.
     public func bytes(at path: [String], name: String) -> Data? {
         guard let parent = folder(at: path) else { return nil }
-        guard case .file(let f) = parent.children[name] else { return nil }
-        return f.data
+        guard case .file(let file) = parent.children[name] else { return nil }
+        return file.data
     }
 
     /// Insert (or replace) a file with the given data and metadata.

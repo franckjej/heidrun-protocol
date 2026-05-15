@@ -91,12 +91,12 @@ private final class ContinuationBox: @unchecked Sendable {
             defer { self.cont = nil }
             return self.cont
         }
-        guard let c = captured else { return }
+        guard let continuation = captured else { return }
         switch result {
         case .success:
-            c.resume()
-        case .failure(let e):
-            c.resume(throwing: e)
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
         }
     }
 }

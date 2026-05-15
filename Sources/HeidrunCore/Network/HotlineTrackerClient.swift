@@ -103,18 +103,18 @@ public enum HotlineTrackerClient {
         for _ in 0..<serversInPacket {
             // Fixed-width prefix: ip(4) + port(2) + users(2) + unused(2) + nameLenByte(1) = 11 bytes
             let fixedHeader = try await connection.receiveExactly(11)
-            var h = ByteCursor(data: fixedHeader)
+            var cursor = ByteCursor(data: fixedHeader)
 
-            let a: UInt8 = h.readBigEndian()
-            let b: UInt8 = h.readBigEndian()
-            let c: UInt8 = h.readBigEndian()
-            let d: UInt8 = h.readBigEndian()
-            let address = "\(a).\(b).\(c).\(d)"
+            let octet1: UInt8 = cursor.readBigEndian()
+            let octet2: UInt8 = cursor.readBigEndian()
+            let octet3: UInt8 = cursor.readBigEndian()
+            let octet4: UInt8 = cursor.readBigEndian()
+            let address = "\(octet1).\(octet2).\(octet3).\(octet4)"
 
-            let serverPort: UInt16 = h.readBigEndian()
-            let users: UInt16      = h.readBigEndian()
-            let _: UInt16          = h.readBigEndian()   // unused/padding
-            let nameLen: UInt8     = h.readBigEndian()
+            let serverPort: UInt16 = cursor.readBigEndian()
+            let users: UInt16      = cursor.readBigEndian()
+            let _: UInt16          = cursor.readBigEndian()   // unused/padding
+            let nameLen: UInt8     = cursor.readBigEndian()
 
             let nameData = nameLen > 0
                 ? try await connection.receiveExactly(Int(nameLen))
