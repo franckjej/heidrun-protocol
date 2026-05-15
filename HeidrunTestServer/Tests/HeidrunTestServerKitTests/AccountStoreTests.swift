@@ -55,3 +55,84 @@ struct AccountStoreErrorTests {
         #expect(same != differentMessage)
     }
 }
+
+@Suite("AccountStore in-memory CRUD")
+struct AccountStoreCRUDTests {
+    @Test("get returns nil for unknown login")
+    func getMissing() async {
+        let store = await AccountStore(snapshotURL: nil)
+        let result = await store.get("ghost")
+        #expect(result == nil)
+    }
+
+    @Test("create then get returns the account; create twice throws duplicate")
+    func createThenGet() async throws {
+        let store = await AccountStore(snapshotURL: nil)
+        let account = ServerAccount(login: "carol", password: "s3cret", nickname: "Carol", privileges: [.sendChat])
+        try await store.create(account)
+        let fetched = await store.get("carol")
+        #expect(fetched == account)
+
+        await #expect(throws: AccountStoreError.duplicate(login: "carol")) {
+            try await store.create(account)
+        }
+    }
+
+    @Test("modify replaces nickname + privileges; missing throws")
+    func modifyExisting() async throws {
+        let store = await AccountStore(snapshotURL: nil)
+        let seeded = ServerAccount(login: "tom", password: "pw", nickname: "Tom", privileges: [.readChat])
+        try await store.create(seeded)
+
+        try await store.modify(
+            login: "tom",
+            password: nil,
+            nickname: "Tommy",
+            privileges: [.readChat, .sendChat]
+        )
+        let updated = await store.get("tom")
+        #expect(updated?.nickname == "Tommy")
+        #expect(updated?.password == "pw")             // unchanged
+        #expect(updated?.privileges.contains(.sendChat) == true)
+
+        await #expect(throws: AccountStoreError.missing(login: "ghost")) {
+            try await store.modify(login: "ghost", password: nil, nickname: "x", privileges: [])
+        }
+    }
+
+    @Test("modify password rules: nil keep, empty clear, otherwise replace")
+    func modifyPasswordRules() async throws {
+        let store = await AccountStore(snapshotURL: nil)
+        try await store.create(ServerAccount(login: "tom", password: "old", nickname: "T", privileges: []))
+
+        try await store.modify(login: "tom", password: nil, nickname: "T", privileges: [])
+        #expect(await store.get("tom")?.password == "old")
+
+        try await store.modify(login: "tom", password: "", nickname: "T", privileges: [])
+        #expect(await store.get("tom")?.password == "")
+
+        try await store.modify(login: "tom", password: "new", nickname: "T", privileges: [])
+        #expect(await store.get("tom")?.password == "new")
+    }
+
+    @Test("delete removes the entry; missing throws")
+    func deleteEntry() async throws {
+        let store = await AccountStore(snapshotURL: nil)
+        try await store.create(ServerAccount(login: "tom", password: "pw", nickname: "Tom", privileges: []))
+        try await store.delete("tom")
+        #expect(await store.get("tom") == nil)
+        await #expect(throws: AccountStoreError.missing(login: "tom")) {
+            try await store.delete("tom")
+        }
+    }
+
+    @Test("seeds populate the store on first init")
+    func seedsAreApplied() async {
+        let seed = ServerAccount(login: "admin", password: "admin", nickname: "Administrator", privileges: [.canBroadcast])
+        let store = await AccountStore(snapshotURL: nil, seeds: [seed])
+        let fetched = await store.get("admin")
+        #expect(fetched == seed)
+        let all = await store.all()
+        #expect(all.count == 1)
+    }
+}
