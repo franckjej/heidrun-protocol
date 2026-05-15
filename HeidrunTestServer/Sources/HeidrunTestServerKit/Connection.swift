@@ -231,12 +231,15 @@ final class Connection: @unchecked Sendable {
         var resolvedPrivileges: UserPrivileges = []
         if !receivedLogin.isEmpty, let account = await state.accounts.get(receivedLogin) {
             guard account.password == receivedPassword else {
+                // Reply with the error and bail out — keep the TCP
+                // socket open so the client receives the error packet
+                // before any FIN. The client will disconnect on its own
+                // once login throws. Tearing the socket down here
+                // races the reply bytes against the FIN and the client
+                // can end up surfacing a generic transport error
+                // instead of "bad password".
                 try await reply(header: header, errorID: 1, errorMessage: "bad password")
-                // Force the read loop to exit so run()'s cleanup path
-                // closes the connection cleanly.
-                throw NSError(domain: "TestServer", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "bad password"
-                ])
+                return
             }
             resolvedPrivileges = account.privileges
         }
