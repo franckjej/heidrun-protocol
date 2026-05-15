@@ -280,8 +280,9 @@ final class Connection: @unchecked Sendable {
 
         // Real Hotline servers push the agreement (transID 109) right
         // after the login reply. Skipped when the server has none
-        // configured, matching servers that don't bother with one.
-        if let agreement = state.agreement {
+        // configured, or when the resolved user has the
+        // `dontShowAgreement` privilege (admin-style accounts opt out).
+        if let agreement = state.agreement, !resolvedPrivileges.contains(.dontShowAgreement) {
             await pushAgreement(agreement)
         }
     }

@@ -46,6 +46,67 @@ struct LoginGateTests {
         }
     }
 
+    @Test("dontShowAgreement privilege suppresses the agreement push")
+    func dontShowAgreementSuppresses() async throws {
+        let seed = ServerAccount(
+            login: "admin",
+            password: "admin",
+            nickname: "Administrator",
+            privileges: [.dontShowAgreement, .canBroadcast]
+        )
+        let server = try await makeServer(seeded: [seed])
+        defer { server.stop() }
+
+        let settings = ConnectionSettings(
+            name: "TestServer",
+            address: "127.0.0.1",
+            port: server.controlPort
+        )
+        let client = try await HotlineNetworkClient.connect(settings: settings)
+
+        // Drain events for half a second after login. A user without
+        // .dontShowAgreement would receive an .agreementReceived push
+        // within ~tens of ms; with the privilege set, none should arrive.
+        let collector = Task { () -> Bool in
+            for await event in client.events {
+                if case .agreementReceived = event { return true }
+            }
+            return false
+        }
+        try await client.login(name: "admin", password: "admin", nickname: "Administrator", icon: 1)
+        try await Task.sleep(for: .milliseconds(500))
+        await client.disconnect()
+
+        let sawAgreement = await collector.value
+        #expect(sawAgreement == false)
+    }
+
+    @Test("a regular user still receives the agreement push")
+    func defaultLoginReceivesAgreement() async throws {
+        let server = try await makeServer(seeded: [])
+        defer { server.stop() }
+
+        let settings = ConnectionSettings(
+            name: "TestServer",
+            address: "127.0.0.1",
+            port: server.controlPort
+        )
+        let client = try await HotlineNetworkClient.connect(settings: settings)
+
+        let collector = Task { () -> Bool in
+            for await event in client.events {
+                if case .agreementReceived = event { return true }
+            }
+            return false
+        }
+        try await client.login(name: "anon", password: "", nickname: "Anon", icon: 1)
+        try await Task.sleep(for: .milliseconds(500))
+        await client.disconnect()
+
+        let sawAgreement = await collector.value
+        #expect(sawAgreement == true)
+    }
+
     @Test("known login with correct password applies stored privileges (visible via connected users)")
     func correctPasswordAppliesPrivileges() async throws {
         let seed = ServerAccount(
