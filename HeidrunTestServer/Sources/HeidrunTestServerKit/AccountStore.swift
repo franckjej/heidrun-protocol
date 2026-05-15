@@ -38,11 +38,24 @@ public actor AccountStore {
     private var byLogin: [String: ServerAccount]
     private let snapshotURL: URL?
 
-    /// `snapshotURL == nil` keeps the store in-memory (used by tests).
-    /// `seeds` are inserted only when the store starts empty.
-    public init(snapshotURL: URL?, seeds: [ServerAccount] = []) async {
+    /// In-memory init. Used by tests and by `ServerState`'s default
+    /// account store. No disk I/O, so the initializer stays synchronous
+    /// and callers in synchronous contexts don't need actor-bridging
+    /// gymnastics.
+    public init(seeds: [ServerAccount] = []) {
+        self.snapshotURL = nil
+        var initial: [String: ServerAccount] = [:]
+        for seed in seeds {
+            initial[seed.login] = seed
+        }
+        self.byLogin = initial
+    }
+
+    /// Snapshot-backed init. Loads the JSON file if it exists; otherwise
+    /// seeds the store and writes a fresh snapshot.
+    public init(snapshotURL: URL, seeds: [ServerAccount] = []) async {
         self.snapshotURL = snapshotURL
-        if let snapshotURL, let loaded = Self.loadSnapshot(at: snapshotURL) {
+        if let loaded = Self.loadSnapshot(at: snapshotURL) {
             self.byLogin = loaded
             return
         }
@@ -51,9 +64,7 @@ public actor AccountStore {
             initial[seed.login] = seed
         }
         self.byLogin = initial
-        if let snapshotURL {
-            try? Self.writeSnapshot(initial, to: snapshotURL)
-        }
+        try? Self.writeSnapshot(initial, to: snapshotURL)
     }
 
     public func get(_ login: String) -> ServerAccount? {

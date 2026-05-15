@@ -80,30 +80,13 @@ public actor ServerState {
     }
 
     private static func makeDefaultAccountStore() -> AccountStore {
-        // Synchronous wrapper — `AccountStore.init` is only async when a
-        // snapshot URL is supplied. For the default in-memory case the
-        // body never suspends, so a sync hop here is safe.
         let seedAdmin = ServerAccount(
             login: "admin",
             password: "admin",
             nickname: "Administrator",
             privileges: ServerState.defaultAdminPrivileges
         )
-        // Build the actor on the current thread without an await: the
-        // initializer for `AccountStore` with `snapshotURL: nil` doesn't
-        // perform any awaiting work, so this is a safe pattern under
-        // Swift 6's actor-init rules.
-        // `nonisolated(unsafe)` suppresses the Swift 6 data-race
-        // diagnostic: the DispatchSemaphore ensures write-before-read, so
-        // this is provably safe even though the compiler can't verify it.
-        let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var store: AccountStore!
-        Task.detached {
-            store = await AccountStore(snapshotURL: nil, seeds: [seedAdmin])
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return store
+        return AccountStore(seeds: [seedAdmin])
     }
 
     /// All privilege bits the test server is willing to grant to a

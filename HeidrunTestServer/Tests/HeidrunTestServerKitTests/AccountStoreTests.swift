@@ -60,14 +60,14 @@ struct AccountStoreErrorTests {
 struct AccountStoreCRUDTests {
     @Test("get returns nil for unknown login")
     func getMissing() async {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         let result = await store.get("ghost")
         #expect(result == nil)
     }
 
     @Test("create then get returns the account; create twice throws duplicate")
     func createThenGet() async throws {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         let account = ServerAccount(login: "carol", password: "s3cret", nickname: "Carol", privileges: [.sendChat])
         try await store.create(account)
         let fetched = await store.get("carol")
@@ -80,7 +80,7 @@ struct AccountStoreCRUDTests {
 
     @Test("modify replaces nickname + privileges; missing throws")
     func modifyExisting() async throws {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         let seeded = ServerAccount(login: "tom", password: "pw", nickname: "Tom", privileges: [.readChat])
         try await store.create(seeded)
 
@@ -102,7 +102,7 @@ struct AccountStoreCRUDTests {
 
     @Test("modify password rules: nil keep, empty clear, otherwise replace")
     func modifyPasswordRules() async throws {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         try await store.create(ServerAccount(login: "tom", password: "old", nickname: "T", privileges: []))
 
         try await store.modify(login: "tom", password: nil, nickname: "T", privileges: [])
@@ -117,7 +117,7 @@ struct AccountStoreCRUDTests {
 
     @Test("delete removes the entry; missing throws")
     func deleteEntry() async throws {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         try await store.create(ServerAccount(login: "tom", password: "pw", nickname: "Tom", privileges: []))
         try await store.delete("tom")
         #expect(await store.get("tom") == nil)
@@ -129,7 +129,7 @@ struct AccountStoreCRUDTests {
     @Test("seeds populate the store on first init")
     func seedsAreApplied() async {
         let seed = ServerAccount(login: "admin", password: "admin", nickname: "Administrator", privileges: [.canBroadcast])
-        let store = await AccountStore(snapshotURL: nil, seeds: [seed])
+        let store = AccountStore(seeds: [seed])
         let fetched = await store.get("admin")
         #expect(fetched == seed)
         let all = await store.all()
@@ -192,12 +192,14 @@ struct ServerStateAdminHelperTests {
         let admin = await state.accounts.get("admin")
         #expect(admin?.login == "admin")
         #expect(admin?.password == "admin")
+        #expect(admin?.nickname == "Administrator")
         #expect(admin?.privileges.contains(.canBroadcast) == true)
+        #expect(admin?.privileges.contains(.createUser) == true)
     }
 
     @Test("adminCreate / adminModify / adminDelete proxy the store")
     func helpersRoundTrip() async throws {
-        let store = await AccountStore(snapshotURL: nil)
+        let store = AccountStore()
         let state = ServerState(advertisedVersion: 185, accounts: store)
 
         try await state.adminCreate(ServerAccount(
