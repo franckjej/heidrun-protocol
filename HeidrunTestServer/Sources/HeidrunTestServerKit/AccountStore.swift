@@ -51,8 +51,8 @@ public actor AccountStore {
             initial[seed.login] = seed
         }
         self.byLogin = initial
-        if snapshotURL != nil {
-            try? Self.writeSnapshot(initial, to: snapshotURL!)
+        if let snapshotURL {
+            try? Self.writeSnapshot(initial, to: snapshotURL)
         }
     }
 
