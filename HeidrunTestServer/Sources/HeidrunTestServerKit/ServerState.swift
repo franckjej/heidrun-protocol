@@ -119,6 +119,7 @@ public actor ServerState {
     func register(
         nickname: String,
         icon: UInt16,
+        privileges: UserPrivileges = [],
         push: @escaping @Sendable (Data) async -> Void
     ) -> UInt16 {
         let socket = nextSocket
@@ -127,7 +128,7 @@ public actor ServerState {
             socket: socket,
             icon: icon,
             status: UserStatus(rawValue: 0),
-            privileges: [],
+            privileges: privileges,
             nickname: nickname
         )
         pushSinks[socket] = push

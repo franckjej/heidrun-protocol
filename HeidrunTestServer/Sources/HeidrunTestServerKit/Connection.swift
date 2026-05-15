@@ -225,8 +225,25 @@ final class Connection: @unchecked Sendable {
     private func handleLogin(header: PacketHeader, fields: [PacketField]) async throws {
         let nick = fields.string(.nickname, encoding: encoding) ?? "anon"
         let iconValue = fields.uint16(.icon) ?? 1
+        let receivedLogin = obfuscatedString(.login, from: fields) ?? ""
+        let receivedPassword = obfuscatedString(.password, from: fields) ?? ""
+
+        var resolvedPrivileges: UserPrivileges = []
+        if !receivedLogin.isEmpty, let account = await state.accounts.get(receivedLogin) {
+            guard account.password == receivedPassword else {
+                try await reply(header: header, errorID: 1, errorMessage: "bad password")
+                // Force the read loop to exit so run()'s cleanup path
+                // closes the connection cleanly.
+                throw NSError(domain: "TestServer", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "bad password"
+                ])
+            }
+            resolvedPrivileges = account.privileges
+        }
+
         self.nickname = nick
         self.icon = iconValue
+
         let push: @Sendable (Data) async -> Void = { [weak self] packet in
             guard let self else { return }
             try? await self.connection.sendAsync(packet)
@@ -234,6 +251,7 @@ final class Connection: @unchecked Sendable {
         self.socketID = await state.register(
             nickname: nick,
             icon: iconValue,
+            privileges: resolvedPrivileges,
             push: push
         )
 
