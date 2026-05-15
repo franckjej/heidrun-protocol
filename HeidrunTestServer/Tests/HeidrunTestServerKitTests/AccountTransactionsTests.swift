@@ -109,4 +109,15 @@ struct AccountTransactionsTests {
             _ = try await client.openLogin("ghost")
         }
     }
+
+    @Test("modifyLogin with a new password replaces the stored value")
+    func modifyNewPasswordReplaces() async throws {
+        let seed = ServerAccount(login: "tom", password: "old", nickname: "Tom", privileges: [])
+        let server = try await makeServer(seeded: [seed])
+        defer { server.stop() }
+        let client = try await connectLoggedIn(server: server)
+
+        try await client.modifyLogin(name: "tom", password: "fresh", nickname: "Tom", privileges: [])
+        #expect(await server.state.accounts.get("tom")?.password == "fresh")
+    }
 }

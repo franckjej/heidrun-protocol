@@ -762,6 +762,8 @@ final class Connection: @unchecked Sendable {
             try await reply(header: header)
         } catch AccountStoreError.duplicate(let name) {
             try await reply(header: header, errorID: 1, errorMessage: "account \(name) already exists")
+        } catch {
+            try await reply(header: header, errorID: 1, errorMessage: "internal error: \(error.localizedDescription)")
         }
     }
 
@@ -776,6 +778,8 @@ final class Connection: @unchecked Sendable {
             try await reply(header: header)
         } catch AccountStoreError.missing(let name) {
             try await reply(header: header, errorID: 1, errorMessage: "account \(name) not found")
+        } catch {
+            try await reply(header: header, errorID: 1, errorMessage: "internal error: \(error.localizedDescription)")
         }
     }
 
@@ -810,6 +814,8 @@ final class Connection: @unchecked Sendable {
             try await reply(header: header)
         } catch AccountStoreError.missing(let name) {
             try await reply(header: header, errorID: 1, errorMessage: "account \(name) not found")
+        } catch {
+            try await reply(header: header, errorID: 1, errorMessage: "internal error: \(error.localizedDescription)")
         }
     }
 
@@ -835,10 +841,10 @@ final class Connection: @unchecked Sendable {
     /// - non-empty obfuscated string → that string
     private func modifyPasswordField(from fields: [PacketField]) -> String? {
         guard let field = fields.first(.password) else { return nil }
-        if field.data == Data([0x00]) {
-            return ""
-        }
-        return obfuscatedString(.password, from: fields)
+        if field.data == Data([0x00]) { return "" }
+        var bytes = Array(field.data)
+        for index in bytes.indices { bytes[index] ^= 0xFF }
+        return String(data: Data(bytes), encoding: encoding)
     }
 
     // MARK: - Helpers
