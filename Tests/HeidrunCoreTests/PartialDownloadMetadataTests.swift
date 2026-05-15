@@ -50,4 +50,13 @@ struct PartialDownloadMetadataErrorTests {
             Issue.record("expected .unsupportedSchema")
         }
     }
+
+    @Test("xattrUnreadable equality compares the message")
+    func xattrUnreadableEqualityComparesMessage() {
+        let same1 = PartialDownloadMetadataError.xattrUnreadable(message: "permission denied")
+        let same2 = PartialDownloadMetadataError.xattrUnreadable(message: "permission denied")
+        let different = PartialDownloadMetadataError.xattrUnreadable(message: "i/o error")
+        #expect(same1 == same2)
+        #expect(same1 != different)
+    }
 }

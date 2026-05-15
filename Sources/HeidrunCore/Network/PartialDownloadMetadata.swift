@@ -8,15 +8,15 @@ public struct PartialDownloadMetadata: Codable, Sendable, Hashable {
     /// Format version. Read paths reject anything that isn't this exact
     /// value via `.unsupportedSchema` so a future schema change can fail
     /// loudly instead of silently truncating fields.
-    public var schemaVersion: Int
-    public var serverAddress: String
-    public var serverPort: UInt16
-    public var serverLogin: String
-    public var serverName: String
-    public var remotePath: [String]
-    public var remoteFileName: String
-    public var totalSize: UInt64
-    public var startedAt: Date
+    public let schemaVersion: Int
+    public let serverAddress: String
+    public let serverPort: UInt16
+    public let serverLogin: String
+    public let serverName: String
+    public let remotePath: [String]
+    public let remoteFileName: String
+    public let totalSize: UInt64
+    public let startedAt: Date
 
     public static let currentSchemaVersion: Int = 1
 
