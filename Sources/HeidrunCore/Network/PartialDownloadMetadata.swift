@@ -49,3 +49,46 @@ public enum PartialDownloadMetadataError: Error, Sendable, Equatable {
     case malformedJSON
     case unsupportedSchema(version: Int)
 }
+
+extension PartialDownloadMetadata {
+    /// The connection-identity bits the download path doesn't already
+    /// know on its own. `remotePath`, `remoteFileName`, `totalSize`,
+    /// `startedAt` are supplied per-download by the caller.
+    public struct SeedFields: Sendable, Hashable {
+        public let serverAddress: String
+        public let serverPort: UInt16
+        public let serverLogin: String
+        public let serverName: String
+
+        public init(
+            serverAddress: String,
+            serverPort: UInt16,
+            serverLogin: String,
+            serverName: String
+        ) {
+            self.serverAddress = serverAddress
+            self.serverPort = serverPort
+            self.serverLogin = serverLogin
+            self.serverName = serverName
+        }
+    }
+
+    public init(
+        seed: SeedFields,
+        remotePath: [String],
+        remoteFileName: String,
+        totalSize: UInt64,
+        startedAt: Date = Date()
+    ) {
+        self.init(
+            serverAddress: seed.serverAddress,
+            serverPort: seed.serverPort,
+            serverLogin: seed.serverLogin,
+            serverName: seed.serverName,
+            remotePath: remotePath,
+            remoteFileName: remoteFileName,
+            totalSize: totalSize,
+            startedAt: startedAt
+        )
+    }
+}

@@ -21,6 +21,27 @@ struct PartialDownloadMetadataTests {
         #expect(metadata.totalSize == 1024)
     }
 
+    @Test("init(seed:) plumbs the seed identity into the full struct")
+    func seedInitPlumbsIdentity() {
+        let seed = PartialDownloadMetadata.SeedFields(
+            serverAddress: "h.example.org",
+            serverPort: 5500,
+            serverLogin: "anon",
+            serverName: "Example"
+        )
+        let metadata = PartialDownloadMetadata(
+            seed: seed,
+            remotePath: ["pub"],
+            remoteFileName: "foo.bin",
+            totalSize: 42
+        )
+        #expect(metadata.serverAddress == "h.example.org")
+        #expect(metadata.serverName == "Example")
+        #expect(metadata.remoteFileName == "foo.bin")
+        #expect(metadata.totalSize == 42)
+        #expect(metadata.schemaVersion == 1)
+    }
+
     @Test("JSON round-trip preserves every field")
     func jsonRoundTrip() throws {
         let original = PartialDownloadMetadata(
