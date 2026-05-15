@@ -136,3 +136,50 @@ struct AccountStoreCRUDTests {
         #expect(all.count == 1)
     }
 }
+
+@Suite("AccountStore JSON snapshot")
+struct AccountStoreSnapshotTests {
+    @Test("snapshot survives a fresh store init pointing at the same URL")
+    func snapshotRoundTrip() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeidrunAccountStoreTest-\(UUID().uuidString)", isDirectory: true)
+        let snapshotURL = temporaryDirectory.appendingPathComponent("accounts.json")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let firstStore = await AccountStore(snapshotURL: snapshotURL)
+        try await firstStore.create(ServerAccount(
+            login: "carol",
+            password: "s3cret",
+            nickname: "Carol",
+            privileges: [.sendChat, .readNews]
+        ))
+        try await firstStore.create(ServerAccount(
+            login: "tom",
+            password: "p",
+            nickname: "Tom",
+            privileges: [.readChat]
+        ))
+        try await firstStore.delete("tom")
+
+        let secondStore = await AccountStore(snapshotURL: snapshotURL)
+        let reloaded = await secondStore.get("carol")
+        #expect(reloaded?.nickname == "Carol")
+        #expect(reloaded?.privileges.contains(.sendChat) == true)
+        #expect(await secondStore.get("tom") == nil)
+    }
+
+    @Test("seeds are written to disk on first init when no snapshot exists")
+    func seedsWrittenOnFirstInit() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeidrunAccountStoreTest-\(UUID().uuidString)", isDirectory: true)
+        let snapshotURL = temporaryDirectory.appendingPathComponent("accounts.json")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let seed = ServerAccount(login: "admin", password: "admin", nickname: "Administrator", privileges: [.canBroadcast])
+        _ = await AccountStore(snapshotURL: snapshotURL, seeds: [seed])
+
+        #expect(FileManager.default.fileExists(atPath: snapshotURL.path))
+        let secondStore = await AccountStore(snapshotURL: snapshotURL)
+        #expect(await secondStore.get("admin") == seed)
+    }
+}
