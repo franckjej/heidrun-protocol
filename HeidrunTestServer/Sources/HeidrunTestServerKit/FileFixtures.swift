@@ -30,6 +30,16 @@ public enum FileFixtures {
             data: Data(repeating: 0xAB, count: 8192),
             type: "DMGf"
         )
+        // Big-enough fixture so a `kill -9` mid-transfer leaves a
+        // meaningfully-sized `.heidrunpart` on disk for the resume smoke
+        // path. Sits in RAM while the server is running — fine for a
+        // manually-launched fixture, not for CI.
+        vfs.putFile(
+            at: [],
+            name: "large-resume-test.bin",
+            data: Data(repeating: 0x55, count: 300 * 1024 * 1024),
+            type: "BINA"
+        )
         return vfs
     }
 }
