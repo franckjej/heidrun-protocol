@@ -36,6 +36,10 @@ public actor ServerState {
     /// to know what each connecting transfer port is for.
     public let vfs: VFS
 
+    /// Admin-managed account roster. Consulted by login (107) and
+    /// mutated by the admin transactions (350/351/352/353).
+    public let accounts: AccountStore
+
     /// Side-channel transfers the control channel has authorised but
     /// the HTXF listener hasn't seen yet.
     private var pendingTransfers: [UInt32: PendingTransfer] = [:]
@@ -64,14 +68,42 @@ public actor ServerState {
     public init(
         advertisedVersion: UInt16,
         agreement: String? = ServerState.defaultAgreement,
-        vfs: VFS = FileFixtures.makeRoot()
+        vfs: VFS = FileFixtures.makeRoot(),
+        accounts: AccountStore? = nil
     ) {
         self.advertisedVersion = advertisedVersion
         self.agreement = agreement
         self.plainPosts = [NewsFixtures.initialPlainFeed]
         self.threaded = NewsFixtures.bundleTree
         self.vfs = vfs
+        self.accounts = accounts ?? ServerState.makeDefaultAccountStore()
     }
+
+    private static func makeDefaultAccountStore() -> AccountStore {
+        let seedAdmin = ServerAccount(
+            login: "admin",
+            password: "admin",
+            nickname: "Administrator",
+            privileges: ServerState.defaultAdminPrivileges
+        )
+        return AccountStore(seeds: [seedAdmin])
+    }
+
+    /// All privilege bits the test server is willing to grant to a
+    /// default admin account. Mirrors a "give them everything we know
+    /// about" preset.
+    public static let defaultAdminPrivileges: UserPrivileges = [
+        .deleteFiles, .uploadFiles, .downloadFiles, .renameFiles, .moveFiles,
+        .createFolders, .deleteFolders, .renameFolders, .moveFolders,
+        .readChat, .sendChat, .initiatePrivateChat, .closePrivateChat,
+        .showInList, .createUser, .deleteUser, .readUser, .modifyUser,
+        .changeOwnPassword, .readNews, .postNews, .disconnectUsers,
+        .cannotBeDisconnected, .getUserInfo, .uploadAnywhere, .useAnyName,
+        .dontShowAgreement, .commentFiles, .commentFolders, .viewDropBoxes,
+        .makeAliases, .canBroadcast, .deleteArticles, .createCategories,
+        .deleteCategories, .createNewsBundles, .deleteNewsBundles,
+        .uploadFolders, .downloadFolders, .sendMessages
+    ]
 
     public static let defaultAgreement: String = """
     Welcome to the Heidrun Test Server.
@@ -87,6 +119,7 @@ public actor ServerState {
     func register(
         nickname: String,
         icon: UInt16,
+        privileges: UserPrivileges = [],
         push: @escaping @Sendable (Data) async -> Void
     ) -> UInt16 {
         let socket = nextSocket
@@ -95,7 +128,7 @@ public actor ServerState {
             socket: socket,
             icon: icon,
             status: UserStatus(rawValue: 0),
-            privileges: [],
+            privileges: privileges,
             nickname: nickname
         )
         pushSinks[socket] = push
@@ -241,5 +274,28 @@ public actor ServerState {
     /// "consumes" the registration once it starts handling it.
     public func takeTransfer(id: UInt32) -> PendingTransfer? {
         pendingTransfers.removeValue(forKey: id)
+    }
+
+    // MARK: - Admin helpers
+
+    public func adminCreate(_ account: ServerAccount) async throws {
+        try await accounts.create(account)
+    }
+
+    public func adminModify(
+        login: String,
+        password: String?,
+        nickname: String,
+        privileges: UserPrivileges
+    ) async throws {
+        try await accounts.modify(login: login, password: password, nickname: nickname, privileges: privileges)
+    }
+
+    public func adminDelete(login: String) async throws {
+        try await accounts.delete(login)
+    }
+
+    public func adminOpen(login: String) async -> ServerAccount? {
+        await accounts.get(login)
     }
 }

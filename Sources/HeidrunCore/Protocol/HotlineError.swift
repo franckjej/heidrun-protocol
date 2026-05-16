@@ -60,4 +60,36 @@ extension HotlineError: CustomStringConvertible {
             return "not implemented"
         }
     }
+
+    /// User-facing rendering suitable for an alert / banner.
+    ///
+    /// `description` exposes the raw protocol shape (used in logs and
+    /// tests). `userMessage` paraphrases it into a sentence the operator
+    /// can act on — lifting the server's `.errorMessage` payload when
+    /// present and turning transport-level cases into something readable.
+    public var userMessage: String {
+        switch self {
+        case .notConnected:
+            return "Connection lost. The server stopped responding."
+        case .notLoggedIn:
+            return "Not logged in."
+        case let .serverError(_, message):
+            guard let message, !message.isEmpty else {
+                return "The server rejected the request."
+            }
+            // Capitalise the first character so it reads as a sentence
+            // even when the server sent a lowercase phrase.
+            return message.prefix(1).uppercased() + message.dropFirst()
+        case .malformedReply(let reason):
+            return "The server's reply didn't make sense (\(reason))."
+        case .cancelled:
+            return "Operation cancelled."
+        case .timedOut:
+            return "The server didn't respond in time."
+        case .permissionDenied:
+            return "Your account doesn't have permission to do that."
+        case .notImplemented:
+            return "Heidrun doesn't support this yet."
+        }
+    }
 }
