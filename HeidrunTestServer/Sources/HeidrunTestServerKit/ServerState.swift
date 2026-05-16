@@ -19,6 +19,12 @@ public actor ServerState {
     /// `< 151` → plain-only news UI, `>= 151` → threaded news UI.
     public let advertisedVersion: UInt16
 
+    /// Cap the download side-channel at this many KB/s. `0` means
+    /// unthrottled — the historical behaviour. Used by the CLI to slow
+    /// loopback transfers down enough that the operator can `kill -9`
+    /// the client mid-transfer for resume-flow smoke tests.
+    public let downloadThrottleKBps: UInt32
+
     /// Agreement banner pushed to each client right after a successful
     /// login (transID 109). `nil` skips the push, mirroring servers that
     /// don't bother with one.
@@ -69,7 +75,8 @@ public actor ServerState {
         advertisedVersion: UInt16,
         agreement: String? = ServerState.defaultAgreement,
         vfs: VFS = FileFixtures.makeRoot(),
-        accounts: AccountStore? = nil
+        accounts: AccountStore? = nil,
+        downloadThrottleKBps: UInt32 = 0
     ) {
         self.advertisedVersion = advertisedVersion
         self.agreement = agreement
@@ -77,6 +84,7 @@ public actor ServerState {
         self.threaded = NewsFixtures.bundleTree
         self.vfs = vfs
         self.accounts = accounts ?? ServerState.makeDefaultAccountStore()
+        self.downloadThrottleKBps = downloadThrottleKBps
     }
 
     private static func makeDefaultAccountStore() -> AccountStore {

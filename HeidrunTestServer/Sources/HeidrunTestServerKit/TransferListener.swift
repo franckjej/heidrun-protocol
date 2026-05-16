@@ -82,11 +82,22 @@ enum TransferListener {
         let start = min(Int(offset), bytes.count)
         let tail = bytes.suffix(from: bytes.startIndex.advanced(by: start))
         let chunkSize = 16 * 1024
-        var i = tail.startIndex
-        while i < tail.endIndex {
-            let end = tail.index(i, offsetBy: chunkSize, limitedBy: tail.endIndex) ?? tail.endIndex
-            try await connection.sendAsync(Data(tail[i..<end]))
-            i = end
+        // Per-chunk sleep when the CLI asked for a throttle. Floored at
+        // 1ms so the runtime can actually honour the request — sub-ms
+        // sleeps round down to zero and are indistinguishable from
+        // unthrottled on the wire.
+        let throttleKBps = state.downloadThrottleKBps
+        let perChunkSleep: Duration? = throttleKBps > 0
+            ? .milliseconds(max(1, Int((Double(chunkSize) / Double(UInt32(1024) &* throttleKBps)) * 1000)))
+            : nil
+        var current = tail.startIndex
+        while current < tail.endIndex {
+            let end = tail.index(current, offsetBy: chunkSize, limitedBy: tail.endIndex) ?? tail.endIndex
+            try await connection.sendAsync(Data(tail[current..<end]))
+            if let perChunkSleep {
+                try await Task.sleep(for: perChunkSleep)
+            }
+            current = end
         }
     }
 

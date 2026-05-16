@@ -8,6 +8,7 @@ struct CLIOptions {
     var port: UInt16 = 5500
     var advertisedVersion: UInt16 = 185   // threaded news by default
     var resetAccounts: Bool = false
+    var downloadThrottleKBps: UInt32 = 0
 }
 
 func parseArgs() -> CLIOptions {
@@ -25,6 +26,8 @@ func parseArgs() -> CLIOptions {
             options.advertisedVersion = 185  // forces threaded UI
         case "--reset-accounts":
             options.resetAccounts = true
+        case "--throttle":
+            if let value = iterator.next(), let rate = UInt32(value) { options.downloadThrottleKBps = rate }
         case "--help", "-h":
             printUsage()
             exit(0)
@@ -51,6 +54,11 @@ func printUsage() {
       --threaded          Force advertised version to 185 (threaded UI)
       --reset-accounts    Delete the accounts snapshot before starting
                           (admin/admin will be re-seeded)
+      --throttle <kbps>   Cap download side-channel at <kbps> KB/s.
+                          Useful for resume-flow smoke tests so the
+                          operator can `kill -9` Heidrun mid-transfer
+                          (e.g. 1024 ≈ 1 MB/s; 300 MB takes ~5 min).
+                          Default 0 = unthrottled.
       --help              This message
 
     Accounts snapshot:
@@ -96,7 +104,8 @@ do {
 
     let state = ServerState(
         advertisedVersion: options.advertisedVersion,
-        accounts: accounts
+        accounts: accounts,
+        downloadThrottleKBps: options.downloadThrottleKBps
     )
     let server = try TestServerInstance.startFixed(port: options.port, state: state)
 
@@ -105,6 +114,9 @@ do {
     print("Advertising server version \(options.advertisedVersion) " +
           "(\(options.advertisedVersion >= 151 ? "threaded news" : "plain news") UI)")
     print("Accounts persisted to \(snapshotURL.path)")
+    if options.downloadThrottleKBps > 0 {
+        print("Download throttle: \(options.downloadThrottleKBps) KB/s")
+    }
 
     // Block forever — Ctrl-C to quit.
     try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
