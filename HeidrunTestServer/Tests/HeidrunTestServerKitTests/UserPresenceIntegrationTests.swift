@@ -85,6 +85,78 @@ struct UserPresenceIntegrationTests {
         }
     }
 
+    @Test("kick disconnects the target and announces userLeft to the rest")
+    func kickDisconnectsTargetAndAnnouncesLeave() async throws {
+        let server = try TestServerInstance.startEphemeral()
+        defer { server.stop() }
+
+        let kicker = try await loggedInClient(controlPort: server.controlPort, nickname: "Kicker")
+        defer { Task { await kicker.disconnect() } }
+
+        // Subscribe to the kicker's events so we can verify the userLeft
+        // push lands once the target's connection is dropped.
+        let kickerEvents = EventCollector()
+        let subscribed = AsyncStream<Void>.makeStream()
+        let drain = Task {
+            var first = true
+            for await event in kicker.events {
+                if first {
+                    subscribed.continuation.finish()
+                    first = false
+                }
+                await kickerEvents.append(event)
+            }
+            if first { subscribed.continuation.finish() }
+        }
+        defer { drain.cancel() }
+        try await kicker.changeNickname("Kicker", icon: 1, persist: false)
+        for await _ in subscribed.stream { break }
+
+        // Target logs in and we wait until the kicker sees its userChanged
+        // so we have the target's server-assigned socket id.
+        let target = try await loggedInClient(controlPort: server.controlPort, nickname: "Target")
+        try await waitFor {
+            await kickerEvents.contains { event in
+                if case .userChanged(let user) = event, user.nickname == "Target" {
+                    return true
+                }
+                return false
+            }
+        }
+        let targetSocket = await kickerEvents.firstSocket(forNickname: "Target") ?? 0
+        #expect(targetSocket != 0)
+
+        // Subscribe to the target's events BEFORE the kick lands so we
+        // can observe the .disconnected push surfaced when the test
+        // server cancels its NWConnection.
+        let targetEvents = EventCollector()
+        let targetDrain = Task {
+            for await event in target.events {
+                await targetEvents.append(event)
+            }
+        }
+        defer { targetDrain.cancel() }
+
+        try await kicker.kick(socket: targetSocket, ban: false)
+
+        // The target sees a transport-level .disconnected event.
+        try await waitFor {
+            await targetEvents.contains { event in
+                if case .disconnected = event { return true }
+                return false
+            }
+        }
+        // The kicker sees the userLeft broadcast for the target's socket.
+        try await waitFor {
+            await kickerEvents.contains { event in
+                if case .userLeft(let socket) = event, socket == targetSocket {
+                    return true
+                }
+                return false
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func loggedInClient(controlPort: UInt16, nickname: String) async throws -> HotlineNetworkClient {

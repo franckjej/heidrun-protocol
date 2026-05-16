@@ -172,6 +172,8 @@ final class Connection: @unchecked Sendable {
             await handleJoinPrivateChat(fields: fields)
         case 116:   // leavePrivateChat (no reply)
             await handleLeavePrivateChat(fields: fields)
+        case 110:   // kick (disconnectUser)
+            try await handleKick(header: header, fields: fields)
         case 120:   // changeChatSubject (no reply)
             await handleChangePrivateChatSubject(fields: fields)
         case 500:   // 185-style ping
@@ -251,11 +253,15 @@ final class Connection: @unchecked Sendable {
             guard let self else { return }
             try? await self.connection.sendAsync(packet)
         }
+        let close: @Sendable () -> Void = { [weak self] in
+            self?.connection.cancel()
+        }
         self.socketID = await state.register(
             nickname: nick,
             icon: iconValue,
             privileges: resolvedPrivileges,
-            push: push
+            push: push,
+            close: close
         )
 
         // Reply with our advertised version so the client picks the
@@ -319,6 +325,26 @@ final class Connection: @unchecked Sendable {
             ]
         )
         await state.broadcast(packet)
+    }
+
+    /// Handle a kick (transID 110): look up the target socket, ACK
+    /// the kicker, then force-close the target's connection. The
+    /// target's `run()` loop sees the cancellation and runs the normal
+    /// disconnect teardown — `state.unregister` plus the trans-302
+    /// broadcast — so other users see the kicked user leave the roster.
+    ///
+    /// The test server does not enforce the `disconnectUsers` privilege
+    /// or persist bans; the `banFlag` field is logged and ignored.
+    private func handleKick(header: PacketHeader, fields: [PacketField]) async throws {
+        let target = fields.uint16(.socket) ?? 0
+        let ban = (fields.uint16(.banFlag) ?? 0) != 0
+        if ban {
+            print("[conn \(socketID)] kick(socket=\(target), ban=1) — ban list not persisted")
+        }
+        // ACK the kicker first so the success reply is observed before
+        // the target's TCP drop ripples through.
+        try await reply(header: header)
+        await state.closeConnection(socket: target)
     }
 
     /// Push a transID 302 (`userLeft`) for `socket` to every connected

@@ -60,6 +60,12 @@ public actor ServerState {
     /// connected user should see a `kInfoNewPost` push.
     private var pushSinks: [UInt16: @Sendable (Data) async -> Void] = [:]
 
+    /// Per-connection close hooks. Calling the closure cancels the
+    /// underlying `NWConnection`, which makes the owning Connection's
+    /// read loop exit and run the normal disconnect teardown (broadcast
+    /// transID 302, drop from private chats). Used by the kick handler.
+    private var closeSinks: [UInt16: @Sendable () -> Void] = [:]
+
     /// Open private-chat rooms keyed by their server-assigned id. The
     /// id is the same value the client sees in the 4-byte chatReference
     /// field of every related transaction.
@@ -128,7 +134,8 @@ public actor ServerState {
         nickname: String,
         icon: UInt16,
         privileges: UserPrivileges = [],
-        push: @escaping @Sendable (Data) async -> Void
+        push: @escaping @Sendable (Data) async -> Void,
+        close: @escaping @Sendable () -> Void
     ) -> UInt16 {
         let socket = nextSocket
         nextSocket &+= 1
@@ -140,12 +147,21 @@ public actor ServerState {
             nickname: nickname
         )
         pushSinks[socket] = push
+        closeSinks[socket] = close
         return socket
     }
 
     func unregister(socket: UInt16) {
         users[socket] = nil
         pushSinks[socket] = nil
+        closeSinks[socket] = nil
+    }
+
+    /// Force the connection owning `socket` to close. The owning
+    /// Connection's read loop sees the cancellation, exits, and runs
+    /// the normal disconnect teardown. No-op for unknown sockets.
+    func closeConnection(socket: UInt16) {
+        closeSinks[socket]?()
     }
 
     func updateUser(socket: UInt16, nickname: String, icon: UInt16) {
