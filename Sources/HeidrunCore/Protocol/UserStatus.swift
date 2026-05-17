@@ -18,6 +18,21 @@ public struct UserStatusFlags: OptionSet, Sendable, Hashable {
     public static let hasPrivateMsg   = UserStatusFlags(rawValue: 1 << 2)
     public static let admin           = UserStatusFlags(rawValue: 1 << 1)
     public static let away            = UserStatusFlags(rawValue: 1 << 0)
+
+    /// Human-readable description: each set flag rendered as a short
+    /// label, joined with " · ". Empty set renders as "Available", which
+    /// is what the Get User Info sheet shows when the server reports no
+    /// active flags.
+    public var displayLabel: String {
+        var parts: [String] = []
+        if contains(.away) { parts.append("Away") }
+        if contains(.admin) { parts.append("Admin") }
+        if contains(.sysOp) { parts.append("SysOp") }
+        if contains(.inPrivateChat) { parts.append("In private chat") }
+        if contains(.hasPrivateMsg) { parts.append("Reading private message") }
+        if contains(.noPrivileges) { parts.append("No privileges") }
+        return parts.isEmpty ? "Available" : parts.joined(separator: " · ")
+    }
 }
 
 /// Two-byte user status: a colour palette index plus a flags byte.

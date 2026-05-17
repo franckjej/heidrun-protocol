@@ -229,6 +229,11 @@ final class Connection: @unchecked Sendable {
         let iconValue = fields.uint16(.icon) ?? 1
         let receivedLogin = obfuscatedString(.login, from: fields) ?? ""
         let receivedPassword = obfuscatedString(.password, from: fields) ?? ""
+        // Field 160 is the client-version number from the login packet.
+        // Default 151 mirrors the real Heidrun client's value so test
+        // servers don't render "version: 0" when an unusual client
+        // omits the field.
+        let clientVersionValue = fields.uint16(.clientVersion) ?? 151
 
         var resolvedPrivileges: UserPrivileges = []
         if !receivedLogin.isEmpty, let account = await state.accounts.get(receivedLogin) {
@@ -256,12 +261,29 @@ final class Connection: @unchecked Sendable {
         let close: @Sendable () -> Void = { [weak self] in
             self?.connection.cancel()
         }
+        let session = ServerState.Session(
+            login: receivedLogin.isEmpty ? "guest" : receivedLogin,
+            clientVersion: clientVersionValue,
+            remoteHost: Self.formatRemoteHost(endpoint: connection.endpoint),
+            loginAt: Date()
+        )
         self.socketID = await state.register(
             nickname: nick,
             icon: iconValue,
             privileges: resolvedPrivileges,
+            session: session,
             push: push,
             close: close
+        )
+
+        // Reverse-DNS the peer in the background so the profile dump
+        // shows a PTR hostname instead of a raw IP once the lookup
+        // lands. Login does not wait — slow recursive resolvers must
+        // not delay the reply or every flaky DNS becomes a flaky login.
+        Self.scheduleReverseDNS(
+            endpoint: connection.endpoint,
+            socket: self.socketID,
+            state: state
         )
 
         // Reply with our advertised version so the client picks the
@@ -371,19 +393,158 @@ final class Connection: @unchecked Sendable {
             try await reply(header: header, errorID: 1)
             return
         }
+        let session = await state.session(forSocket: target)
+        let profile = Self.renderUserInfoProfile(user: user, session: session)
         try await reply(
             header: header,
             fields: [
                 PacketField.string(.nickname, user.nickname, encoding: encoding),
                 PacketField.uint16(.icon, user.icon),
                 PacketField.uint16(.status, user.status.rawValue),
-                PacketField.string(
-                    .message,
-                    "Test server user — connected via Heidrun-Swift.",
-                    encoding: encoding
-                )
+                PacketField.string(.login, session?.login ?? "", encoding: encoding),
+                PacketField.string(.message, profile, encoding: encoding)
             ]
         )
+    }
+
+    /// Render the gate.tastybytes.org-style profile dump for a user.
+    /// The format mirrors what mature Hotline servers send back as
+    /// field 101 on a 303 reply: a column-aligned key/value table,
+    /// followed by transfer subsections. Returns a single string with
+    /// `\r` line breaks (the Hotline-on-the-wire newline).
+    static func renderUserInfoProfile(
+        user: User,
+        session: ServerState.Session?
+    ) -> String {
+        let labelWidth = "login tm".count
+        func row(_ label: String, _ value: String) -> String {
+            let padded = String(repeating: " ", count: max(0, labelWidth - label.count)) + label
+            return "\(padded): \(value)"
+        }
+
+        let host = session?.remoteHost ?? "—"
+        let login = session?.login ?? "—"
+        let version = session.map { String($0.clientVersion) + " compatible" } ?? "—"
+        let loginTime = session.map { Self.formatLoginTime($0.loginAt) } ?? "—"
+        let color = user.status.color
+        let lines: [String] = [
+            row("name", user.nickname),
+            row("login", login),
+            row("host", host),
+            row("version", version),
+            row("uid", String(user.socket)),
+            row("color", String(color)),
+            row("icon", String(user.icon)),
+            row("login tm", loginTime),
+            "--------------------------------",
+            " - Downloads -",
+            " - Uploads -"
+        ]
+        return lines.joined(separator: "\r")
+    }
+
+    /// Format a `Date` to roughly the legacy Hotline server style:
+    /// `H:MM:SSa zzz MMM d`. Locale-fixed (POSIX) so test fixtures and
+    /// snapshots don't drift on a CI machine with a different region.
+    private static func formatLoginTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "h:mm:ssa zzz MMM d"
+        return formatter.string(from: date)
+    }
+
+    /// Extract a `host:port` string from an `NWEndpoint`. We accept the
+    /// `.hostPort` flavour (TCP / UDP) and fall through to a
+    /// description-based fallback so non-IP endpoints (Bonjour, Unix)
+    /// still render something useful in the profile dump.
+    private static func formatRemoteHost(endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case let .hostPort(host: host, port: port):
+            return "\(formatHost(host)):\(port.rawValue)"
+        default:
+            return "\(endpoint)"
+        }
+    }
+
+    /// Render an `NWEndpoint.Host` without the IPv6 zone suffix /
+    /// `Optional(...)` chatter that `debugDescription` adds. Plain
+    /// strings here read cleanly when joined with the port.
+    private static func formatHost(_ host: NWEndpoint.Host) -> String {
+        switch host {
+        case let .ipv4(addr): return "\(addr)"
+        case let .ipv6(addr): return "\(addr)"
+        case let .name(name, _): return name
+        @unknown default: return "\(host)"
+        }
+    }
+
+    /// Kick off a detached reverse-DNS lookup that, once the PTR
+    /// record lands, replaces the session's `remoteHost` so the next
+    /// Get-Info renders the hostname instead of the raw IP. Connections
+    /// behind a NAT with no PTR (most consumer ISPs) simply leave the
+    /// IP in place — `NI_NAMEREQD` returns an error rather than the
+    /// stringified address, so we can keep the existing value cleanly.
+    static func scheduleReverseDNS(
+        endpoint: NWEndpoint,
+        socket: UInt16,
+        state: ServerState
+    ) {
+        guard case let .hostPort(host: host, port: port) = endpoint else { return }
+        let ipLiteral = formatHost(host)
+        let portValue = port.rawValue
+        Task.detached(priority: .utility) {
+            guard let hostname = await reverseLookup(ip: ipLiteral, port: portValue) else {
+                return
+            }
+            await state.updateSessionRemoteHost(
+                socket: socket,
+                host: "\(hostname):\(portValue)"
+            )
+        }
+    }
+
+    /// Resolve `ip` to a hostname via a PTR query. Returns `nil` when
+    /// the IP has no PTR record (the common case for residential WAN
+    /// connections), when the address can't be parsed, or on any other
+    /// `getnameinfo` failure — callers must fall back to the IP
+    /// themselves.
+    ///
+    /// Runs the blocking `getnameinfo(3)` call on a detached cooperative
+    /// thread; resolution can take seconds and would otherwise stall
+    /// the connection's task pool.
+    static func reverseLookup(ip: String, port: UInt16) async -> String? {
+        await Task.detached(priority: .utility) { () -> String? in
+            var hints = addrinfo()
+            hints.ai_family = AF_UNSPEC
+            hints.ai_socktype = SOCK_STREAM
+            hints.ai_flags = AI_NUMERICHOST
+
+            var resolved: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(ip, String(port), &hints, &resolved) == 0,
+                  let entry = resolved
+            else { return nil }
+            defer { freeaddrinfo(resolved) }
+
+            var nameBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let status = getnameinfo(
+                entry.pointee.ai_addr,
+                entry.pointee.ai_addrlen,
+                &nameBuffer,
+                socklen_t(nameBuffer.count),
+                nil,
+                0,
+                NI_NAMEREQD
+            )
+            guard status == 0 else { return nil }
+            // `nameBuffer` is a fixed-size CChar array padded with
+            // trailing NULs; take the prefix up to the first NUL and
+            // decode it as UTF-8 (POSIX hostnames are ASCII-safe).
+            let bytes = nameBuffer
+                .prefix(while: { $0 != 0 })
+                .map { UInt8(bitPattern: $0) }
+            let hostname = String(decoding: bytes, as: UTF8.self)
+            return hostname.isEmpty ? nil : hostname
+        }.value
     }
 
     private func handleNicknameChange(fields: [PacketField]) async {

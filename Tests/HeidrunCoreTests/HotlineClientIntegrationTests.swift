@@ -173,6 +173,146 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    /// `fetchUserInfo` (303) parses the server's reply into a
+    /// `UserInfo` value carrying the nickname, status flags, account
+    /// login (field 105, XOR-obfuscated on the wire), and the
+    /// free-form info text the user wrote into their profile pane.
+    @Test("fetchUserInfo decodes nickname, account login (obfuscated), status, and info text")
+    func fetchUserInfoDecodesReply() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(
+                name: "test",
+                address: "127.0.0.1",
+                port: server.port
+            )
+        )
+        let serverConn = try await serverConnTask
+
+        async let serverWork: Void = {
+            let packet = try await serverConn.readPacket()
+            #expect(packet.header.transactionID == 303)
+            #expect(packet.fields.uint16(.socket) == 42)
+            try await serverConn.sendReply(
+                transactionID: packet.header.transactionID,
+                taskNumber: packet.header.taskNumber,
+                fields: [
+                    .string(.nickname, "Erika"),
+                    .uint16(.icon, 128),
+                    // Status low byte = away | admin = 0b0000_0011 = 0x03.
+                    .uint16(.status, 0x0003),
+                    .obfuscatedString(.login, "erika.account"),
+                    .string(.message, "Friendly fish.\nBased in Stockholm.")
+                ]
+            )
+        }()
+
+        let info = try await client.fetchUserInfo(socket: 42)
+        try await serverWork
+
+        #expect(info.user.socket == 42)
+        #expect(info.user.nickname == "Erika")
+        #expect(info.user.icon == 128)
+        #expect(info.user.status.flags.contains(.away))
+        #expect(info.user.status.flags.contains(.admin))
+        #expect(info.accountLogin == "erika.account")
+        #expect(info.infoText == "Friendly fish.\nBased in Stockholm.")
+
+        await client.disconnect()
+        serverConn.close()
+    }
+
+    /// Some Hotline servers send field 105 on the 303 reply as plain
+    /// text rather than the XOR-obfuscated form used on auth-side
+    /// transactions. The decoder sniffs the byte distribution and
+    /// picks the right path; a plain "admin" must come back as
+    /// "admin", not as five high-bit garbage characters.
+    @Test("fetchUserInfo decodes plain-text login (server doesn't obfuscate field 105 on the reply)")
+    func fetchUserInfoDecodesPlainLogin() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(
+                name: "test",
+                address: "127.0.0.1",
+                port: server.port
+            )
+        )
+        let serverConn = try await serverConnTask
+
+        async let serverWork: Void = {
+            let packet = try await serverConn.readPacket()
+            try await serverConn.sendReply(
+                transactionID: packet.header.transactionID,
+                taskNumber: packet.header.taskNumber,
+                fields: [
+                    .string(.nickname, "Admin"),
+                    .uint16(.icon, 0),
+                    .uint16(.status, 0x0002),
+                    // Plain "admin" — high bit clear on every byte.
+                    .string(.login, "admin"),
+                    .string(.message, "")
+                ]
+            )
+        }()
+
+        let info = try await client.fetchUserInfo(socket: 1)
+        try await serverWork
+
+        #expect(info.accountLogin == "admin")
+
+        await client.disconnect()
+        serverConn.close()
+    }
+
+    /// Servers that omit field 105 on the 303 reply (some guest-only
+    /// setups) still return a useful `UserInfo` — `accountLogin` falls
+    /// back to the empty string and the sheet treats that as "—".
+    @Test("fetchUserInfo tolerates a server that omits field 105")
+    func fetchUserInfoToleratesMissingLogin() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(
+                name: "test",
+                address: "127.0.0.1",
+                port: server.port
+            )
+        )
+        let serverConn = try await serverConnTask
+
+        async let serverWork: Void = {
+            let packet = try await serverConn.readPacket()
+            try await serverConn.sendReply(
+                transactionID: packet.header.transactionID,
+                taskNumber: packet.header.taskNumber,
+                fields: [
+                    .string(.nickname, "Guest"),
+                    .uint16(.icon, 0),
+                    .uint16(.status, 0x0000),
+                    .string(.message, "")
+                ]
+            )
+        }()
+
+        let info = try await client.fetchUserInfo(socket: 7)
+        try await serverWork
+
+        #expect(info.accountLogin == "")
+        #expect(info.user.nickname == "Guest")
+        #expect(info.infoText == "")
+
+        await client.disconnect()
+        serverConn.close()
+    }
+
     /// Server pushes an unsolicited `broadcast` (transID 355). The
     /// client's `events` stream should deliver `.broadcastReceived`.
     @Test("server-pushed broadcast surfaces via the events stream")

@@ -56,6 +56,32 @@ public actor ServerState {
     /// Connected users, keyed by socket.
     private var users: [UInt16: User] = [:]
 
+    /// Per-connection metadata the user list itself doesn't carry but
+    /// the "get user info" reply (transID 303) renders into the profile
+    /// dump: the login the peer authenticated as, the version number
+    /// they sent in the login transaction, the IP:port we accepted them
+    /// from, and the moment they finished logging in.
+    public struct Session: Sendable, Hashable {
+        public var login: String
+        public var clientVersion: UInt16
+        public var remoteHost: String
+        public var loginAt: Date
+
+        public init(
+            login: String,
+            clientVersion: UInt16,
+            remoteHost: String,
+            loginAt: Date
+        ) {
+            self.login = login
+            self.clientVersion = clientVersion
+            self.remoteHost = remoteHost
+            self.loginAt = loginAt
+        }
+    }
+
+    private var sessions: [UInt16: Session] = [:]
+
     /// Per-connection event sinks. When a client posts plain news, every
     /// connected user should see a `kInfoNewPost` push.
     private var pushSinks: [UInt16: @Sendable (Data) async -> Void] = [:]
@@ -134,6 +160,7 @@ public actor ServerState {
         nickname: String,
         icon: UInt16,
         privileges: UserPrivileges = [],
+        session: Session,
         push: @escaping @Sendable (Data) async -> Void,
         close: @escaping @Sendable () -> Void
     ) -> UInt16 {
@@ -146,6 +173,7 @@ public actor ServerState {
             privileges: privileges,
             nickname: nickname
         )
+        sessions[socket] = session
         pushSinks[socket] = push
         closeSinks[socket] = close
         return socket
@@ -153,8 +181,27 @@ public actor ServerState {
 
     func unregister(socket: UInt16) {
         users[socket] = nil
+        sessions[socket] = nil
         pushSinks[socket] = nil
         closeSinks[socket] = nil
+    }
+
+    /// Lookup the per-connection metadata captured at login time. Used
+    /// by `handleUserInfo` to render the profile dump; `nil` for a
+    /// socket that has logged out (or was never registered).
+    func session(forSocket socket: UInt16) -> Session? {
+        sessions[socket]
+    }
+
+    /// Replace a connected session's `remoteHost` string in place. The
+    /// background reverse-DNS task calls this once a PTR record lands
+    /// so the next `handleUserInfo` rendering picks up the hostname
+    /// instead of the bare IP we stored at login time. No-op for a
+    /// socket that has already disconnected.
+    func updateSessionRemoteHost(socket: UInt16, host: String) {
+        guard var session = sessions[socket] else { return }
+        session.remoteHost = host
+        sessions[socket] = session
     }
 
     /// Force the connection owning `socket` to close. The owning

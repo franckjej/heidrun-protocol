@@ -41,15 +41,24 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
 
 /// Extended profile a server returns from "get user info".
 ///
-/// The original API stuffed it inside an `NSDictionary`. The wire-level
-/// payload is just the core `User` plus a free-form info string the user
-/// wrote into their profile pane.
+/// The wire-level payload is the core `User`, the account login name the
+/// peer authenticated as (field 105), and a free-form info string the
+/// user wrote into their profile pane (field 101). The legacy
+/// Objective-C client stuffed all three into an `NSDictionary`; here
+/// they're explicit so the call site reads at a glance.
+///
+/// `accountLogin` may be empty if the server omits field 105 — most
+/// modern Hotline servers send it, but guest-only setups sometimes
+/// don't, so the sheet should treat empty as "not provided" rather
+/// than as an error.
 public struct UserInfo: Sendable, Hashable {
     public var user: User
+    public var accountLogin: String
     public var infoText: String
 
-    public init(user: User, infoText: String) {
+    public init(user: User, accountLogin: String = "", infoText: String) {
         self.user = user
+        self.accountLogin = accountLogin
         self.infoText = infoText
     }
 }

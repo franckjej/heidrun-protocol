@@ -435,8 +435,36 @@ public actor HotlineNetworkClient: HotlineClient {
             privileges: [],
             nickname: reply.string(.nickname, encoding: stringEncoding) ?? ""
         )
+        let accountLogin = Self.decodeLoginField(reply.first(.login), encoding: stringEncoding)
         let infoText = reply.string(.message, encoding: stringEncoding) ?? ""
-        return UserInfo(user: user, infoText: infoText)
+        return UserInfo(user: user, accountLogin: accountLogin, infoText: infoText)
+    }
+
+    /// Decode the `login` (objID 105) field from a 303 reply. Server
+    /// implementations disagree on whether to XOR-obfuscate this field
+    /// here: the auth-side convention says obfuscated, but plenty of
+    /// servers send it plain on the info reply. We sniff the byte
+    /// distribution and pick the right decoder: a plain ASCII login is
+    /// all low-bit bytes; an obfuscated one is all high-bit bytes
+    /// (because XOR with 0xFF flips the top bit of ASCII). Empty bytes
+    /// or a missing field both return "".
+    static func decodeLoginField(
+        _ field: PacketField?,
+        encoding: String.Encoding
+    ) -> String {
+        guard let field, !field.data.isEmpty else { return "" }
+        let highBitCount = field.data.reduce(0) { count, byte in
+            byte >= 0x80 ? count + 1 : count
+        }
+        let looksObfuscated = highBitCount * 2 > field.data.count
+        if looksObfuscated {
+            var bytes = field.data
+            for index in bytes.indices {
+                bytes[index] = bytes[index] ^ 0xFF
+            }
+            return String(data: bytes, encoding: encoding) ?? ""
+        }
+        return String(data: field.data, encoding: encoding) ?? ""
     }
 
     public func kick(socket: UInt16, ban: Bool) async throws {
