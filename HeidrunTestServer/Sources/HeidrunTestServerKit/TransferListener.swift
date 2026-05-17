@@ -37,6 +37,13 @@ enum TransferListener {
                 return
             }
 
+            // Park the connection so a control-channel trans=214 can
+            // cancel us mid-stream. Deregistration runs in the trailing
+            // cleanup regardless of whether we finish, error, or are
+            // cancelled.
+            await state.registerActiveTransfer(id: transferID, connection: connection)
+            defer { Task { await state.deregisterActiveTransfer(id: transferID) } }
+
             switch pending {
             case .download(let path, let name, let offset):
                 try await streamDownload(

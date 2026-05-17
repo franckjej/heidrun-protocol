@@ -323,6 +323,19 @@ extension HotlineNetworkClient {
     }
 
     public func cancelTransfer(_ handle: TransferHandle) async throws {
+        // Tell the server to abort: trans=214, transferID(107) field.
+        // Without this the server keeps streaming bytes until our side-
+        // channel TCP drops, holding its transfer-queue slot open the
+        // whole time. Sent before the local actor tear-down so the wire
+        // notification is on its way before we stop draining the socket.
+        // `try?` because the user-visible cancel must not fail if the
+        // main connection is itself wobbling — local cleanup still runs.
+        var transferIDBytes = Data()
+        transferIDBytes.appendBigEndian(handle.transferID)
+        _ = try? await sendNoReply(
+            transactionID: 214,
+            fields: [PacketField(key: .transferID, data: transferIDBytes)]
+        )
         if let actor = activeTransfers.removeValue(forKey: handle.transferID) {
             await actor.cancel()
         }

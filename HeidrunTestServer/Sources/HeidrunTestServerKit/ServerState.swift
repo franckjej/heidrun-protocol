@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import HeidrunCore
 
 /// One open private-chat room. Membership is just a set of sockets;
@@ -49,6 +50,14 @@ public actor ServerState {
     /// Side-channel transfers the control channel has authorised but
     /// the HTXF listener hasn't seen yet.
     private var pendingTransfers: [UInt32: PendingTransfer] = [:]
+
+    /// Side-channel connections currently streaming a transfer. Tracked
+    /// so trans=214 (cancelFileTransfer) can pull the plug — cancelling
+    /// the NWConnection makes the listener's in-flight `sendAsync` /
+    /// `receiveExactly` throw, the handler's `do { ... } catch { }`
+    /// swallows the error and `connection.cancel()` runs cleanly. Keyed
+    /// by the transfer id the client cited in the cancel transaction.
+    private var activeTransferConnections: [UInt32: NWConnection] = [:]
 
     /// Monotonic transfer id counter. Shared across downloads/uploads.
     private var nextTransferID: UInt32 = 1
@@ -345,6 +354,32 @@ public actor ServerState {
     /// "consumes" the registration once it starts handling it.
     public func takeTransfer(id: UInt32) -> PendingTransfer? {
         pendingTransfers.removeValue(forKey: id)
+    }
+
+    /// Park the side-channel `NWConnection` for an in-flight transfer
+    /// so a later trans=214 can cancel it. Called by `TransferListener`
+    /// right after `takeTransfer` succeeds.
+    public func registerActiveTransfer(id: UInt32, connection: NWConnection) {
+        activeTransferConnections[id] = connection
+    }
+
+    /// Drop the active-transfer registration. Called by `TransferListener`
+    /// in its cleanup path, after the transfer completes successfully or
+    /// fails.
+    public func deregisterActiveTransfer(id: UInt32) {
+        activeTransferConnections[id] = nil
+    }
+
+    /// Cancel a transfer the client gave up on (trans=214). If the
+    /// side channel hasn't connected yet, drop the pending registration
+    /// so its eventual HTXF preamble looks unknown and gets rejected. If
+    /// the side channel is mid-stream, cancel its `NWConnection` so the
+    /// listener's `try await` throws and the handler exits cleanly.
+    public func cancelTransfer(id: UInt32) {
+        pendingTransfers[id] = nil
+        if let connection = activeTransferConnections.removeValue(forKey: id) {
+            connection.cancel()
+        }
     }
 
     // MARK: - Admin helpers

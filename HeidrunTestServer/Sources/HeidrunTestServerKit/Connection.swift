@@ -204,6 +204,8 @@ final class Connection: @unchecked Sendable {
             try await handleFileInfo(header: header, fields: fields)
         case 207:   // set file info (rename or comment)
             try await handleSetFileInfo(header: header, fields: fields)
+        case 214:   // cancelFileTransfer (no reply expected on the wire)
+            await handleCancelTransfer(fields: fields)
         case 350:   // createLogin
             try await handleCreateLogin(header: header, fields: fields)
         case 351:   // deleteLogin
@@ -933,6 +935,17 @@ final class Connection: @unchecked Sendable {
             out.append(.string(.fileComment, meta.comment, encoding: encoding))
         }
         try await reply(header: header, fields: out)
+    }
+
+    /// Client trans=214: abort a transfer the user gave up on. Carries
+    /// a single `transferID(107)` field. We drop the pending registration
+    /// (if the side channel never connected) and/or cancel the in-flight
+    /// `NWConnection` (if it did). No reply is sent — the legacy client
+    /// marks the slot expecting a reply but does nothing with it, so a
+    /// silent drop is wire-compatible.
+    private func handleCancelTransfer(fields: [PacketField]) async {
+        guard let transferID = fields.uint32(.transferID) else { return }
+        await state.cancelTransfer(id: transferID)
     }
 
     private func handleSetFileInfo(header: PacketHeader, fields: [PacketField]) async throws {
