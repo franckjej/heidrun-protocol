@@ -82,7 +82,24 @@ public actor HotlineNetworkClient: HotlineClient {
         let parameters = NWParameters(tls: nil, tcp: tcp)
         let connection = NWConnection(host: host, port: port, using: parameters)
         let queue = DispatchQueue(label: "Heidrun.HotlineNetworkClient")
-        try await connection.startAndWaitForReady(on: queue)
+        // Race the connect against an explicit 15s deadline. NWConnection's
+        // `tcp.connectionTimeout` is documented but doesn't reliably flip
+        // the connection to `.failed` for black-holed routes (firewall
+        // silently dropping SYNs), so we time it out ourselves: cancel the
+        // connection from the watchdog task and let the canceller surface
+        // a `HotlineError.notConnected` to the host.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await connection.startAndWaitForReady(on: queue)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(15))
+                connection.cancel()
+                throw HotlineError.notConnected
+            }
+            try await group.next()
+            group.cancelAll()
+        }
         try await Self.performHandshake(on: connection)
 
         let client = HotlineNetworkClient(
