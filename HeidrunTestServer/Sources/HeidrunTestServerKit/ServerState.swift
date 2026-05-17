@@ -169,7 +169,7 @@ public actor ServerState {
         users[socket] = User(
             socket: socket,
             icon: icon,
-            status: UserStatus(rawValue: 0),
+            status: Self.statusForPrivileges(privileges),
             privileges: privileges,
             nickname: nickname
         )
@@ -368,5 +368,20 @@ public actor ServerState {
 
     public func adminOpen(login: String) async -> ServerAccount? {
         await accounts.get(login)
+    }
+
+    /// Derive the visible `UserStatus` a user broadcasts to others on
+    /// the roster from their privilege bitmask. Real Hotline servers
+    /// communicate admin role via the palette byte (high byte of
+    /// `hotStatus`), with palette ID 36 — pure red `#ff0000` — being
+    /// the canonical "admin" colour the original client renders bold
+    /// red. We treat `disconnectUsers` as the canonical admin power
+    /// because no regular user has it. The status flag byte stays
+    /// zero: classic Hotline only uses those bits for transient state
+    /// (away, in-private-chat), never for role.
+    static func statusForPrivileges(_ privileges: UserPrivileges) -> UserStatus {
+        let adminPaletteID: UInt8 = 36
+        let color: UInt8 = privileges.contains(.disconnectUsers) ? adminPaletteID : 0
+        return UserStatus(color: color, flags: [])
     }
 }
