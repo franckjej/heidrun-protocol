@@ -305,9 +305,9 @@ struct HotlineClientIntegrationTests {
         let info = try await client.fetchUserInfo(socket: 7)
         try await serverWork
 
-        #expect(info.accountLogin == "")
+        #expect(info.accountLogin.isEmpty)
         #expect(info.user.nickname == "Guest")
-        #expect(info.infoText == "")
+        #expect(info.infoText.isEmpty)
 
         await client.disconnect()
         serverConn.close()
