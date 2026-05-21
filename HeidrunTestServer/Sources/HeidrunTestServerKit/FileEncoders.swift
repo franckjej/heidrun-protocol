@@ -24,27 +24,13 @@ enum FileEncoders {
     /// Encode a 4-character `longFileType` / `longFileCreator` payload.
     /// Wire layout: just the four raw bytes.
     static func longFourCC(_ value: HeidrunCore.FourCharCode) -> Data {
-        var data = Data()
-        append4cc(&data, value)
-        return data
+        LongFourCC.encode(value)
     }
 
     /// Encode a Hotline date field (8 bytes: UInt16 baseYear + 2 reserved +
     /// UInt32 secondsSince1904).
     static func dateField(_ date: Date, key: HotlineObjectKey) -> PacketField {
-        var data = Data(capacity: 8)
-        data.appendBE(UInt16(1904))                  // base year
-        data.appendBE(UInt16(0))                     // 2 reserved bytes
-        data.appendBE(HotlineDate.encode(date))
-        return PacketField(key: key, data: data)
-    }
-
-    private static func append4cc(_ out: inout Data, _ code: HeidrunCore.FourCharCode) {
-        let raw = code.rawValue
-        out.append(UInt8((raw >> 24) & 0xFF))
-        out.append(UInt8((raw >> 16) & 0xFF))
-        out.append(UInt8((raw >>  8) & 0xFF))
-        out.append(UInt8( raw        & 0xFF))
+        HotlineDateField.encode(date, key: key)
     }
 }
 
