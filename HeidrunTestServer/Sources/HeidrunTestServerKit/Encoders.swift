@@ -74,41 +74,18 @@ enum Encoders {
         _ posts: [Post],
         encoding: String.Encoding = .macOSRoman
     ) -> PacketField {
-        var data = Data()
-        data.appendBE(UInt32(0))
-        data.appendBE(UInt32(posts.count))
-        data.appendBE(UInt16(0))
-
         let now = Date()
-        let calendar = Calendar(identifier: .gregorian)
-        let year = UInt16(calendar.component(.year, from: now))
-        let startOfYear = calendar.date(from: DateComponents(year: Int(year), month: 1, day: 1)) ?? now
-        let secondsSinceYear = UInt32(now.timeIntervalSince(startOfYear))
-
-        for (index, post) in posts.enumerated() {
-            data.appendBE(UInt32(index + 1))   // threadID
-            data.appendBE(year)
-            data.appendBE(UInt16(0))
-            data.appendBE(secondsSinceYear)
-            data.appendBE(UInt32(0))           // parent (top-level)
-            data.appendBE(UInt32(0))           // 4-byte constant
-            data.appendBE(UInt16(1))           // one element per post
-
-            let titleBytes = post.title.data(using: encoding, allowLossyConversion: true) ?? Data()
-            let authorBytes = post.author.data(using: encoding, allowLossyConversion: true) ?? Data()
-            let mime = "text/plain"
-            let mimeBytes = mime.data(using: .ascii) ?? Data()
-
-            data.append(UInt8(min(titleBytes.count, 255)))
-            data.append(titleBytes.prefix(255))
-            data.append(UInt8(min(authorBytes.count, 255)))
-            data.append(authorBytes.prefix(255))
-            data.append(UInt8(min(mimeBytes.count, 255)))
-            data.append(mimeBytes.prefix(255))
-            let bodyBytes = post.body.data(using: encoding, allowLossyConversion: true) ?? Data()
-            data.appendBE(UInt16(clamping: bodyBytes.count))
+        let entries = posts.enumerated().map { (index, post) in
+            NewsThreadListEntry(
+                threadID: UInt16(index + 1),
+                parentID: UInt16(0),
+                postedAt: now,
+                title: post.title,
+                author: post.author,
+                body: post.body,
+                mimeType: "text/plain"
+            )
         }
-
-        return PacketField(key: HotlineObjectKey.newsThreadList, data: data)
+        return NewsThreadListCodec.encode(entries, encoding: encoding)
     }
 }
