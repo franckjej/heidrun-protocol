@@ -43,28 +43,7 @@ enum Encoders {
         itemCount: UInt16,
         encoding: String.Encoding = .macOSRoman
     ) -> PacketField {
-        var data = Data()
-        data.appendBE(kind.rawValue)
-        data.appendBE(itemCount)
-
-        let nameBytes = name.data(using: encoding, allowLossyConversion: true) ?? Data()
-        let nameLen = UInt8(min(nameBytes.count, 255))
-
-        switch kind {
-        case .bundle:
-            data.append(nameLen)
-            data.append(nameBytes.prefix(Int(nameLen)))
-            data.append(0)  // unique-identifier byte (unused)
-
-        case .category:
-            data.append(Data(repeating: 0, count: 16)) // 16-byte identifier
-            data.append(Data(repeating: 0, count: 8))  // reserved
-            data.append(nameLen)
-            data.append(nameBytes.prefix(Int(nameLen)))
-            data.append(Data(repeating: 0, count: 3))  // reserved trailer
-        }
-
-        return PacketField(key: HotlineObjectKey.newsBundleEntry, data: data)
+        NewsBundleEntryCodec.encode(name: name, kind: kind, itemCount: itemCount, encoding: encoding)
     }
 
     /// Encode an entire news-thread list (object key 321).
