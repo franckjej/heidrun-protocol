@@ -18,15 +18,7 @@ enum FileEncoders {
     /// u_int8_t  name[nameLength]
     /// ```
     static func fileListEntry(_ file: RemoteFile, encoding: String.Encoding = .macOSRoman) -> PacketField {
-        var data = Data(capacity: 20 + file.name.count)
-        append4cc(&data, file.type)
-        append4cc(&data, file.creator)
-        data.appendBE(file.size)
-        data.appendBE(file.itemCount)
-        let nameBytes = file.name.data(using: encoding, allowLossyConversion: true) ?? Data()
-        data.appendBE(UInt32(clamping: nameBytes.count))
-        data.append(nameBytes)
-        return PacketField(key: HotlineObjectKey.fileListEntry, data: data)
+        FileListEntryCodec.encode(file, encoding: encoding)
     }
 
     /// Encode a 4-character `longFileType` / `longFileCreator` payload.

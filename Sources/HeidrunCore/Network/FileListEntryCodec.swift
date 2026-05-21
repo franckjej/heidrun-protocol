@@ -50,6 +50,22 @@ public enum FileListEntryCodec {
         )
     }
 
+    /// Encode a `RemoteFile` as the body bytes for a `fileListEntry` object (key 200).
+    public static func encode(
+        _ file: RemoteFile,
+        encoding: String.Encoding = .macOSRoman
+    ) -> PacketField {
+        var data = Data(capacity: 20 + file.name.count)
+        data.appendBigEndian(file.type.rawValue)
+        data.appendBigEndian(file.creator.rawValue)
+        data.appendBigEndian(file.size)
+        data.appendBigEndian(file.itemCount)
+        let nameBytes = file.name.data(using: encoding, allowLossyConversion: true) ?? Data()
+        data.appendBigEndian(UInt32(clamping: nameBytes.count))
+        data.append(nameBytes)
+        return PacketField(key: HotlineObjectKey.fileListEntry, data: data)
+    }
+
     private static func fourCharCode(from data: Data) -> FourCharCode {
         let bytes = Array(data.prefix(4)) + Array(repeating: UInt8(0), count: max(0, 4 - data.count))
         return FourCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
