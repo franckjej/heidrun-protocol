@@ -17,14 +17,7 @@ enum Encoders {
     /// UInt8  nickname[length]
     /// ```
     static func userListEntry(_ user: User, encoding: String.Encoding = .macOSRoman) -> PacketField {
-        var data = Data()
-        data.appendBE(user.socket)
-        data.appendBE(user.icon)
-        data.appendBE(user.status.rawValue)
-        let nameBytes = user.nickname.data(using: encoding, allowLossyConversion: true) ?? Data()
-        data.appendBE(UInt16(clamping: nameBytes.count))
-        data.append(nameBytes)
-        return PacketField(key: HotlineObjectKey.userListEntry, data: data)
+        UserListEntryCodec.encode(user, encoding: encoding)
     }
 
     /// Encode one news-bundle entry (object key 323).

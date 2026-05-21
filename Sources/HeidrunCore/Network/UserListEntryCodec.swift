@@ -36,4 +36,19 @@ public enum UserListEntryCodec {
             nickname: nickname
         )
     }
+
+    /// Encode a `User` as the body bytes for a `userListEntry` object (key 300).
+    public static func encode(
+        _ user: User,
+        encoding: String.Encoding = .macOSRoman
+    ) -> PacketField {
+        var data = Data(capacity: 8 + user.nickname.utf8.count)
+        data.appendBigEndian(user.socket)
+        data.appendBigEndian(user.icon)
+        data.appendBigEndian(user.status.rawValue)
+        let nameBytes = user.nickname.data(using: encoding, allowLossyConversion: true) ?? Data()
+        data.appendBigEndian(UInt16(clamping: nameBytes.count))
+        data.append(nameBytes)
+        return PacketField(key: HotlineObjectKey.userListEntry, data: data)
+    }
 }
