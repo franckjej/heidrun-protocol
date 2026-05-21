@@ -41,3 +41,26 @@ extension PacketField {
         PacketField(key: key, data: path.encoded(using: encoding))
     }
 }
+
+extension RemotePath {
+    /// Decode a `filePath` / `newsPath` / `destinationPath` blob into
+    /// `RemotePath`. Returns `nil` when the buffer is truncated or
+    /// claims a longer component than the remaining bytes can supply.
+    public init?(decoding data: Data, encoding: String.Encoding = .macOSRoman) {
+        guard data.count >= 2 else { return nil }
+        var cursor = ByteCursor(data: data)
+        let count: UInt16 = cursor.readBigEndian()
+        var components: [String] = []
+        components.reserveCapacity(Int(count))
+        for _ in 0..<Int(count) {
+            guard cursor.remaining >= 3 else { return nil }
+            _ = cursor.readData(count: 2)                     // reserved
+            let lengthByte = cursor.readData(count: 1)
+            let length = Int(lengthByte.first ?? 0)
+            guard cursor.remaining >= length else { return nil }
+            let nameBytes = cursor.readData(count: length)
+            components.append(String(data: nameBytes, encoding: encoding) ?? "")
+        }
+        self.init(components: components)
+    }
+}
