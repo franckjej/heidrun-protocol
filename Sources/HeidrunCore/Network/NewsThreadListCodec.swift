@@ -101,6 +101,51 @@ public enum NewsThreadListCodec {
         return threads
     }
 
+    /// Encode a list of `NewsThreadListEntry` rows as the body bytes for
+    /// a `newsThreadList` object (key 321). `postedAt` is encoded as
+    /// `(baseYear, secondsSinceJan1)` in UTC.
+    public static func encode(
+        _ entries: [NewsThreadListEntry],
+        encoding: String.Encoding = .macOSRoman
+    ) -> PacketField {
+        var data = Data()
+        data.appendBigEndian(UInt32(0))                         // leading 4-byte constant
+        data.appendBigEndian(UInt32(entries.count))             // threadCount
+        data.appendBigEndian(UInt16(0))                         // separator
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
+
+        for entry in entries {
+            let year = UInt16(clamping: calendar.component(.year, from: entry.postedAt))
+            let startOfYear = calendar.date(from: DateComponents(year: Int(year), month: 1, day: 1)) ?? entry.postedAt
+            let secondsSinceYear = UInt32(max(0, entry.postedAt.timeIntervalSince(startOfYear)))
+
+            data.appendBigEndian(UInt32(entry.threadID))
+            data.appendBigEndian(year)
+            data.appendBigEndian(UInt16(0))                     // reserved
+            data.appendBigEndian(secondsSinceYear)
+            data.appendBigEndian(UInt32(entry.parentID))
+            data.appendBigEndian(UInt32(0))                     // constant
+            data.appendBigEndian(UInt16(1))                     // one element per thread row
+
+            let titleBytes = entry.title.data(using: encoding, allowLossyConversion: true) ?? Data()
+            let authorBytes = entry.author.data(using: encoding, allowLossyConversion: true) ?? Data()
+            let mimeBytes = entry.mimeType.data(using: .ascii) ?? Data()
+            let bodyBytes = entry.body.data(using: encoding, allowLossyConversion: true) ?? Data()
+
+            data.append(UInt8(min(titleBytes.count, 255)))
+            data.append(titleBytes.prefix(255))
+            data.append(UInt8(min(authorBytes.count, 255)))
+            data.append(authorBytes.prefix(255))
+            data.append(UInt8(min(mimeBytes.count, 255)))
+            data.append(mimeBytes.prefix(255))
+            data.appendBigEndian(UInt16(clamping: bodyBytes.count))
+        }
+
+        return PacketField(key: HotlineObjectKey.newsThreadList, data: data)
+    }
+
     /// Hotline thread dates are encoded as (baseYear, secondsSinceJan1OfBaseYear).
     /// Reconstruct the Gregorian date in UTC; fall back to `distantPast` if
     /// the year is zero (some servers leave it unset).

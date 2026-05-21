@@ -62,4 +62,38 @@ public enum NewsBundleEntryCodec {
             size: count
         )
     }
+
+    /// Encode a news-bundle row as the body bytes for a `newsBundleEntry`
+    /// object (key 323). Has two wire variants — bundles (leaf) include
+    /// a trailing unique-id byte; categories carry a 16-byte identifier
+    /// header and trailing reserved bytes.
+    public static func encode(
+        name: String,
+        kind: NewsBundle.Kind,
+        itemCount: UInt16,
+        encoding: String.Encoding = .macOSRoman
+    ) -> PacketField {
+        let nameBytes = name.data(using: encoding, allowLossyConversion: true) ?? Data()
+        let nameLength = UInt8(min(nameBytes.count, 255))
+
+        var data = Data(capacity: kind == .category ? 32 + Int(nameLength) : 5 + Int(nameLength))
+        data.appendBigEndian(kind.rawValue)
+        data.appendBigEndian(itemCount)
+
+        switch kind {
+        case .bundle:
+            data.append(nameLength)
+            data.append(nameBytes.prefix(Int(nameLength)))
+            data.append(0)                              // trailing unique-identifier byte (server fills on reply; zero on send)
+
+        case .category:
+            data.append(Data(repeating: 0, count: 16))  // identifier (server fills; zero on send)
+            data.append(Data(repeating: 0, count: 8))   // reserved
+            data.append(nameLength)
+            data.append(nameBytes.prefix(Int(nameLength)))
+            data.append(Data(repeating: 0, count: 3))   // reserved trailer
+        }
+
+        return PacketField(key: HotlineObjectKey.newsBundleEntry, data: data)
+    }
 }

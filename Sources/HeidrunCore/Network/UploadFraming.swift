@@ -144,4 +144,107 @@ public enum UploadFraming {
         out.appendBigEndian(UInt32(0))                        // resource length
         return out
     }
+
+    public enum DecodeError: Error, Equatable {
+        case truncated
+        case missingMagic(String)
+    }
+
+    /// Decode the inbound FILP / INFO / DATA / MACR envelope a client
+    /// sends on an upload's HTXF side-channel. The byte count is
+    /// announced by the HTXF preamble's `transferSize` field, so the
+    /// caller is expected to hand over an exact-length buffer.
+    public static func decode(
+        _ payload: Data,
+        encoding: String.Encoding = .macOSRoman
+    ) throws -> UploadEnvelope {
+        var cursor = 0
+        func need(_ count: Int) throws {
+            guard cursor + count <= payload.count else { throw DecodeError.truncated }
+        }
+        func readMagic(_ expected: String) throws {
+            try need(4)
+            let chunk = payload[(payload.startIndex + cursor)..<(payload.startIndex + cursor + 4)]
+            let ascii = String(data: chunk, encoding: .ascii) ?? ""
+            cursor += 4
+            guard ascii == expected else { throw DecodeError.missingMagic(expected) }
+        }
+        func readBEUInt16() throws -> UInt16 {
+            try need(2)
+            let base = payload.startIndex + cursor
+            let value = UInt16(payload[base]) << 8 | UInt16(payload[base + 1])
+            cursor += 2
+            return value
+        }
+        func readBEUInt32() throws -> UInt32 {
+            try need(4)
+            let base = payload.startIndex + cursor
+            let value: UInt32 = UInt32(payload[base]) << 24
+                              | UInt32(payload[base + 1]) << 16
+                              | UInt32(payload[base + 2]) << 8
+                              | UInt32(payload[base + 3])
+            cursor += 4
+            return value
+        }
+        func skip(_ count: Int) throws {
+            try need(count)
+            cursor += count
+        }
+        func readBytes(_ count: Int) throws -> Data {
+            try need(count)
+            let base = payload.startIndex + cursor
+            let bytes = payload[base..<(base + count)]
+            cursor += count
+            return Data(bytes)
+        }
+
+        try readMagic("FILP")
+        try skip(2)                                   // version
+        try skip(14)                                  // reserved
+        _ = try readBEUInt32()                        // forkCount, typically 3
+        try readMagic("INFO")
+        try skip(8)                                   // reserved
+        let infoLength = try readBEUInt32()
+
+        let infoStart = cursor
+        try skip(4)                                   // "AMAC"
+        let typeCode = try readBEUInt32()
+        let creatorCode = try readBEUInt32()
+        try skip(4)                                   // reserved
+        _ = try readBEUInt32()                        // magic constant 256
+        try skip(32)                                  // reserved
+        try skip(2)                                   // 1904 base year
+        try skip(2)                                   // reserved
+        _ = try readBEUInt32()                        // creation seconds
+        try skip(2)                                   // base year
+        try skip(2)                                   // reserved
+        _ = try readBEUInt32()                        // modification seconds
+        try skip(2)                                   // reserved
+        let nameLength = try readBEUInt16()
+        let nameBytes = try readBytes(Int(nameLength))
+        let fileName = String(data: nameBytes, encoding: encoding) ?? ""
+
+        let infoConsumed = cursor - infoStart
+        if infoConsumed < Int(infoLength) {
+            try skip(Int(infoLength) - infoConsumed)
+        }
+
+        try readMagic("DATA")
+        try skip(8)                                   // reserved
+        let dataLength = try readBEUInt32()
+        let fork = try readBytes(Int(dataLength))
+
+        try readMagic("MACR")
+        try skip(8)                                   // reserved
+        let resourceLength = try readBEUInt32()
+        let resourceFork = resourceLength > 0 ? try readBytes(Int(resourceLength)) : Data()
+
+        return UploadEnvelope(
+            fileName: fileName,
+            data: fork,
+            resourceFork: resourceFork,
+            type: FourCharCode(rawValue: typeCode),
+            creator: FourCharCode(rawValue: creatorCode)
+        )
+    }
 }
