@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 @testable import HeidrunCore
@@ -229,3 +230,4 @@ private final class ServerResumeBox<T: Sendable>: @unchecked Sendable {
         }
     }
 }
+#endif

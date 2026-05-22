@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -150,3 +151,4 @@ public actor FileTransferActor {
         }
     }
 }
+#endif

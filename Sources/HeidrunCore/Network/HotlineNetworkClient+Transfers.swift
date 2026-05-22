@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -459,3 +460,4 @@ extension HotlineNetworkClient {
         return actor
     }
 }
+#endif

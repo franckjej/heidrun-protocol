@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 import Testing
@@ -371,3 +372,4 @@ struct HotlineTrackerClientTests {
         #expect(set.count == 1)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -151,3 +152,4 @@ public enum HotlineTrackerClient {
         0x00, 0x01               // version 1
     ])
 }
+#endif

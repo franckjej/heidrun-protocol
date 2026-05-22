@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -760,3 +761,4 @@ public actor HotlineNetworkClient: HotlineClient {
         return FourCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
     }
 }
+#endif
