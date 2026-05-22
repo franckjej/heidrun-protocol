@@ -63,6 +63,22 @@ public struct UserPrivileges: OptionSet, Sendable, Hashable {
     // Byte 5
     public static let sendMessages        = UserPrivileges(rawValue: 1 << 40)
 
+    /// Every defined privilege bit OR'd together. Use to seed a
+    /// super-admin account that should be able to perform every
+    /// operation the protocol exposes.
+    public static let all: UserPrivileges = [
+        .deleteFiles, .uploadFiles, .downloadFiles, .renameFiles, .moveFiles,
+        .createFolders, .deleteFolders, .renameFolders, .moveFolders,
+        .readChat, .sendChat, .initiatePrivateChat, .closePrivateChat,
+        .showInList, .createUser, .deleteUser, .readUser, .modifyUser,
+        .changeOwnPassword, .readNews, .postNews, .disconnectUsers,
+        .cannotBeDisconnected, .getUserInfo, .uploadAnywhere, .useAnyName,
+        .dontShowAgreement, .commentFiles, .commentFolders, .viewDropBoxes,
+        .makeAliases, .canBroadcast, .deleteArticles, .createCategories,
+        .deleteCategories, .createNewsBundles, .deleteNewsBundles,
+        .uploadFolders, .downloadFolders, .sendMessages
+    ]
+
     /// Decode an 8-byte privilege blob from a Hotline packet.
     public init(bytes: some Sequence<UInt8>) {
         var value: UInt64 = 0
