@@ -1,3 +1,4 @@
+#if canImport(Darwin)
 import Foundation
 import Darwin
 
@@ -77,3 +78,4 @@ public enum PartialDownloadXattr {
         }
     }
 }
+#endif
