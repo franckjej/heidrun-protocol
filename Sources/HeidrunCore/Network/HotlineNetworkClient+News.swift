@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 
 extension HotlineNetworkClient {
@@ -139,3 +140,4 @@ extension HotlineNetworkClient {
         )
     }
 }
+#endif

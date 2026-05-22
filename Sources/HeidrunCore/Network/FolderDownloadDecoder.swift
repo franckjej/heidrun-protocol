@@ -1,3 +1,4 @@
+#if canImport(Network)
 import Foundation
 
 /// One entry yielded while a folder download streams.
@@ -277,3 +278,4 @@ public enum FolderDownloadDecoder {
         )
     }
 }
+#endif
