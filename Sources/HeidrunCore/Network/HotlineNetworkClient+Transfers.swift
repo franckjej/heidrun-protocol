@@ -206,11 +206,17 @@ extension HotlineNetworkClient {
         type: FourCharCode = .file,
         creator: FourCharCode = .unknown,
         creationDate: Date = Date(),
-        modificationDate: Date = Date()
+        modificationDate: Date = Date(),
+        progress: (@Sendable (UInt64) async -> Void)? = nil
     ) async throws {
         guard let actor = activeTransfers[handle.transferID] else {
             throw HotlineError.notConnected
         }
+
+        // Cumulative count of data-fork bytes the server has accepted,
+        // updated after each item. Directories and skipped items don't
+        // bump the counter — they contribute zero payload bytes.
+        var cumulativeBytes: UInt64 = 0
 
         var first = true
         for item in items {
@@ -259,6 +265,11 @@ extension HotlineNetworkClient {
                     modificationDate: modificationDate,
                     dataForkOffset: info.dataForkOffset
                 )
+                let offset = UInt64(info.dataForkOffset)
+                let remaining = UInt64(item.data.count) > offset
+                    ? UInt64(item.data.count) - offset
+                    : 0
+                cumulativeBytes &+= remaining
             case .upload:
                 try await sendItemPayload(
                     item: item,
@@ -269,7 +280,9 @@ extension HotlineNetworkClient {
                     modificationDate: modificationDate,
                     dataForkOffset: 0
                 )
+                cumulativeBytes &+= UInt64(item.data.count)
             }
+            await progress?(cumulativeBytes)
         }
 
         await actor.finishUpload()

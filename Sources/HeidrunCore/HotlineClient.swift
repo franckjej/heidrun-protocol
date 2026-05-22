@@ -392,6 +392,21 @@ public protocol HotlineClient: Sendable {
         modificationDate: Date,
         progress: (@Sendable (UInt64) async -> Void)?
     ) async throws
+
+    /// Send the per-item items for a folder upload started with
+    /// `startFolderUpload(...)`. Directories appear as items with
+    /// `isDirectory == true` and empty `data`; files carry their data
+    /// fork. `progress` reports cumulative data-fork bytes accepted by
+    /// the server, fired once per item.
+    func sendFolderUpload(
+        _ items: [FolderUploadItem],
+        for handle: TransferHandle,
+        type: FourCharCode,
+        creator: FourCharCode,
+        creationDate: Date,
+        modificationDate: Date,
+        progress: (@Sendable (UInt64) async -> Void)?
+    ) async throws
 }
 
 extension HotlineClient {
@@ -408,6 +423,25 @@ extension HotlineClient {
             content,
             for: handle,
             fileName: fileName,
+            type: .file,
+            creator: .unknown,
+            creationDate: now,
+            modificationDate: now,
+            progress: progress
+        )
+    }
+
+    /// Convenience overload for `sendFolderUpload(...)` that defaults
+    /// metadata to "now" and generic file/creator codes.
+    public func sendFolderUpload(
+        _ items: [FolderUploadItem],
+        for handle: TransferHandle,
+        progress: (@Sendable (UInt64) async -> Void)? = nil
+    ) async throws {
+        let now = Date()
+        try await sendFolderUpload(
+            items,
+            for: handle,
             type: .file,
             creator: .unknown,
             creationDate: now,
