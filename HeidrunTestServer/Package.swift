@@ -11,7 +11,7 @@ let package = Package(
         .executable(name: "HeidrunTestServer", targets: ["HeidrunTestServer"])
     ],
     dependencies: [
-        .package(path: "../HeidrunCore")
+        .package(path: "..")
     ],
     targets: [
         .target(
