@@ -45,11 +45,12 @@ public struct ByteCursor: Sendable {
 }
 
 extension Data {
-    /// Append a fixed-width integer in big-endian order.
-    mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
+    /// Append a fixed-width integer in big-endian order. Used widely
+    /// by codec and wire-format code in HeidrunCore and HeidrunServer.
+    public mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
         let size = MemoryLayout<T>.size
-        for i in stride(from: size - 1, through: 0, by: -1) {
-            append(UInt8(truncatingIfNeeded: value >> (i * 8)))
+        for offset in stride(from: size - 1, through: 0, by: -1) {
+            append(UInt8(truncatingIfNeeded: value >> (offset * 8)))
         }
     }
 }
