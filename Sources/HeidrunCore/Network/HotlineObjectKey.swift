@@ -21,6 +21,10 @@ public enum HotlineObjectKey: UInt16, Sendable, Hashable, CaseIterable {
     case chatReference   = 114   // 4 bytes
     case chatSubject     = 115
     case transferQueue   = 116
+    /// Server-banner format hint, sent alongside the 212 reply when
+    /// the operator supplies one. Values per the Hotline spec:
+    /// 1 = URL, 3 = JPEG, 4 = GIF, 5 = BMP, 6 = PICT.
+    case bannerType      = 152
     case autoAgree       = 154
     case clientVersion   = 160
     case serverName      = 162

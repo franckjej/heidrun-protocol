@@ -22,4 +22,17 @@ struct TransferHandshakeTests {
         let sizeBytes = Array(bytes[8..<12])
         #expect(sizeBytes == [0x00, 0x00, 0x40, 0x00])
     }
+
+    @Test("banner handshake substitutes UInt16(2) + UInt16(0) for the reserved UInt32")
+    func bannerHandshake() {
+        let bytes = TransferHandshake.encodeBanner(transferID: 0x1234_ABCD)
+        #expect(bytes.count == TransferHandshake.byteCount)
+        #expect(Array(bytes) == [
+            0x48, 0x54, 0x58, 0x46,             // "HTXF"
+            0x12, 0x34, 0xAB, 0xCD,             // transferID
+            0x00, 0x00, 0x00, 0x00,             // dataSize (0 for banner)
+            0x00, 0x02,                         // type = 2 (banner)
+            0x00, 0x00                          // reserved UInt16
+        ])
+    }
 }

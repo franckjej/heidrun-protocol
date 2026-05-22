@@ -343,6 +343,15 @@ public protocol HotlineClient: Sendable {
     /// Begin downloading a folder as a stream of files.
     func startFolderDownload(at path: RemotePath, name: String) async throws -> TransferHandle
 
+    /// Fetch the server's banner image (transID 212). The 212 reply
+    /// carries a `transferID` + `transferSize`; the client opens an
+    /// HTXF side-channel with the banner-flavoured preamble (type=2)
+    /// and reads the bytes. Returns the raw payload alongside the
+    /// declared `BannerType` (1 = URL, 3 = JPEG, 4 = GIF, 5 = BMP,
+    /// 6 = PICT) so callers can decode + display it correctly.
+    /// `nil` when the server hasn't configured one.
+    func downloadBanner() async throws -> ServerBanner?
+
     /// Begin uploading a file.
     func startUpload(
         at path: RemotePath,

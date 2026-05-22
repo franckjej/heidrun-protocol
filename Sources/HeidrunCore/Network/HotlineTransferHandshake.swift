@@ -54,4 +54,19 @@ public enum TransferHandshake {
         data.appendBigEndian(UInt16(3))
         return data
     }
+
+    /// 16-byte handshake for a server-banner download (transID 212).
+    /// Per the Hotline protocol spec, the trailing `_reserved1` UInt32
+    /// is split into two UInt16 fields with values `2, 0` — the
+    /// marker the server uses to distinguish a banner stream from a
+    /// regular file download (which uses 0, 0).
+    public static func encodeBanner(transferID: UInt32) -> Data {
+        var data = Data(capacity: byteCount)
+        data.append(contentsOf: magic)
+        data.appendBigEndian(transferID)
+        data.appendBigEndian(UInt32(0))
+        data.appendBigEndian(UInt16(2))
+        data.appendBigEndian(UInt16(0))
+        return data
+    }
 }

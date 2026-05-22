@@ -432,6 +432,62 @@ extension HotlineNetworkClient {
         return actor
     }
 
+    /// Same as `openSideChannel(...)` but sends the banner-flavoured
+    /// 16-byte preamble (type=2). Used by `downloadBanner()`.
+    private func openBannerSideChannel(transferID: UInt32, totalSize: UInt64) async throws -> FileTransferActor {
+        let actor = try await openRawSideChannel(transferID: transferID, totalSize: totalSize)
+        try await actor.sendBytes(TransferHandshake.encodeBanner(transferID: transferID))
+        return actor
+    }
+
+    public func downloadBanner() async throws -> ServerBanner? {
+        // Control channel: transID 212 — downloadBanner. The request
+        // body is empty per the Hotline spec; the reply carries
+        // transferID(107) + transferSize(108) + an optional
+        // bannerType(152) hint. Servers without a configured banner
+        // reply with an error transaction — we surface that as `nil`
+        // rather than propagating, since the absence of a banner is
+        // a normal, expected condition, not a failure.
+        let reply: [PacketField]
+        do {
+            reply = try await sendExpectingReply(transactionID: 212, fields: [])
+        } catch {
+            return nil
+        }
+        guard let transferID = reply.uint32(.transferID) else {
+            throw HotlineError.malformedReply(reason: "missing transferID")
+        }
+        let totalSize = reply.uint32(.transferSize) ?? 0
+        guard totalSize > 0 else { return nil }
+
+        let kindRaw = reply.uint16(.bannerType) ?? ServerBanner.Kind.jpeg.rawValue
+        let kind = ServerBanner.Kind(rawValue: kindRaw) ?? .jpeg
+
+        let actor = try await openBannerSideChannel(
+            transferID: transferID,
+            totalSize: UInt64(totalSize)
+        )
+        activeTransfers[transferID] = actor
+
+        // Drain the side-channel into a single Data buffer. Banners
+        // are tiny (typically <100 KB), so this isn't worth streaming
+        // — give the caller a single immutable blob and reclaim the
+        // transfer slot before returning.
+        var buffer = Data()
+        buffer.reserveCapacity(Int(totalSize))
+        do {
+            for try await chunk in actor.bytes() {
+                buffer.append(chunk)
+                if buffer.count >= Int(totalSize) { break }
+            }
+        } catch {
+            activeTransfers.removeValue(forKey: transferID)
+            throw error
+        }
+        activeTransfers.removeValue(forKey: transferID)
+        return ServerBanner(kind: kind, data: buffer)
+    }
+
     /// Same as `openSideChannel(...)` but sends one of the folder-flavour
     /// HTXF preambles instead of the regular 16-byte handshake.
     private func openFolderSideChannel(
