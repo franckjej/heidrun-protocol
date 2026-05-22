@@ -427,20 +427,7 @@ extension HotlineNetworkClient {
     /// port + 1), perform the HTXF handshake, and hand back the actor
     /// that wraps the connection.
     private func openSideChannel(transferID: UInt32, totalSize: UInt64) async throws -> FileTransferActor {
-        let host = NWEndpoint.Host(connectionSettings.address)
-        guard let port = NWEndpoint.Port(rawValue: connectionSettings.port &+ 1) else {
-            throw HotlineError.notConnected
-        }
-        let sideQueue = DispatchQueue(label: "Heidrun.transfer.\(transferID)")
-        let sideConnection = NWConnection(host: host, port: port, using: .tcp)
-        try await sideConnection.startAndWaitForReady(on: sideQueue)
-
-        let actor = FileTransferActor(
-            connection: sideConnection,
-            queue: sideQueue,
-            transferID: transferID,
-            totalSize: totalSize
-        )
+        let actor = try await openRawSideChannel(transferID: transferID, totalSize: totalSize)
         try await actor.sendHandshake(transferSize: 0)
         return actor
     }
@@ -452,25 +439,40 @@ extension HotlineNetworkClient {
         totalSize: UInt64,
         isDownload: Bool
     ) async throws -> FileTransferActor {
-        let host = NWEndpoint.Host(connectionSettings.address)
-        guard let port = NWEndpoint.Port(rawValue: connectionSettings.port &+ 1) else {
-            throw HotlineError.notConnected
-        }
-        let sideQueue = DispatchQueue(label: "Heidrun.transfer.\(transferID)")
-        let sideConnection = NWConnection(host: host, port: port, using: .tcp)
-        try await sideConnection.startAndWaitForReady(on: sideQueue)
-
-        let actor = FileTransferActor(
-            connection: sideConnection,
-            queue: sideQueue,
-            transferID: transferID,
-            totalSize: totalSize
-        )
+        let actor = try await openRawSideChannel(transferID: transferID, totalSize: totalSize)
         let handshake = isDownload
             ? TransferHandshake.encodeFolderDownload(transferID: transferID)
             : TransferHandshake.encodeFolderUpload(transferID: transferID)
         try await actor.sendBytes(handshake)
         return actor
+    }
+
+    /// Open the HTXF transport — TLS-wrapped on the (control+1) port
+    /// when the session was started with `useTLS`, plain TCP otherwise.
+    /// The handshake bytes the caller sends are written *after* TLS
+    /// finishes (this matches the server: NIOSSL unwraps the bytes
+    /// before they hit the HTXF preamble reader).
+    private func openRawSideChannel(
+        transferID: UInt32,
+        totalSize: UInt64
+    ) async throws -> FileTransferActor {
+        let host = NWEndpoint.Host(connectionSettings.address)
+        guard let port = NWEndpoint.Port(rawValue: connectionSettings.port &+ 1) else {
+            throw HotlineError.notConnected
+        }
+        let sideQueue = DispatchQueue(label: "Heidrun.transfer.\(transferID)")
+        let parameters: NWParameters = connectionSettings.useTLS
+            ? NWParameters(tls: NWProtocolTLS.Options(), tcp: NWProtocolTCP.Options())
+            : .tcp
+        let sideConnection = NWConnection(host: host, port: port, using: parameters)
+        try await sideConnection.startAndWaitForReady(on: sideQueue)
+
+        return FileTransferActor(
+            connection: sideConnection,
+            queue: sideQueue,
+            transferID: transferID,
+            totalSize: totalSize
+        )
     }
 }
 #endif

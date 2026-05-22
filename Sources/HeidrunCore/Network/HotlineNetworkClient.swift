@@ -80,7 +80,15 @@ public actor HotlineNetworkClient: HotlineClient {
         tcp.keepaliveIdle = 30
         tcp.keepaliveInterval = 10
         tcp.keepaliveCount = 3
-        let parameters = NWParameters(tls: nil, tcp: tcp)
+        // `tls: nil` is plain TCP; `tls: NWProtocolTLS.Options()` uses
+        // the system trust store with TLS 1.2 default minimum. The
+        // server side (NIOSSL, sibling port pair) sets the same floor,
+        // so any modern cert (Let's Encrypt / public CA) works without
+        // further wiring. Self-signed support is intentionally deferred.
+        let parameters = NWParameters(
+            tls: settings.useTLS ? NWProtocolTLS.Options() : nil,
+            tcp: tcp
+        )
         let connection = NWConnection(host: host, port: port, using: parameters)
         let queue = DispatchQueue(label: "Heidrun.HotlineNetworkClient")
         // Race the connect against an explicit 15s deadline. NWConnection's
