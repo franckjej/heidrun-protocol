@@ -245,6 +245,36 @@ struct HotlineTrackerClientTests {
         try await serverTask
     }
 
+    @Test("times out when the tracker accepts but never replies")
+    func fetchTimesOut() async throws {
+        let fakeServer = try await MiniTrackerServer.start()
+        defer { fakeServer.stop() }
+
+        // Accept the connection, consume the handshake, then go silent.
+        // The second read blocks until the client gives up and closes,
+        // so this task ends promptly once the client times out.
+        async let serverTask: Void = {
+            let conn = try await fakeServer.acceptNextConnection()
+            defer { conn.cancel() }
+            _ = try? await conn.receiveExactly(6)   // client handshake
+            _ = try? await conn.receiveExactly(1)   // never arrives; unblocks on client close
+        }()
+
+        let startedAt = ContinuousClock.now
+        await #expect(throws: HotlineError.timedOut) {
+            _ = try await HotlineTrackerClient.fetchServers(
+                host: "127.0.0.1",
+                port: fakeServer.port,
+                timeout: .milliseconds(300)
+            )
+        }
+        let elapsed = ContinuousClock.now - startedAt
+        // Must trip on our watchdog, not the multi-second OS TCP timeout.
+        #expect(elapsed < .seconds(2))
+
+        _ = try? await serverTask
+    }
+
     // MARK: String encoding
 
     @Test("non-ASCII name and description round-trip via MacRoman")

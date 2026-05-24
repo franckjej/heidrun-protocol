@@ -57,7 +57,8 @@ public enum HotlineTrackerClient {
     public static func fetchServers(
         host: String,
         port: UInt16 = 5498,
-        stringEncoding: String.Encoding = .macOSRoman
+        stringEncoding: String.Encoding = .macOSRoman,
+        timeout: Duration = .seconds(10)
     ) async throws -> [TrackerServer] {
         let queue = DispatchQueue(label: "HotlineTrackerClient")
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
@@ -71,75 +72,116 @@ public enum HotlineTrackerClient {
         )
         defer { connection.cancel() }
 
-        try await connection.startAndWaitForReady(on: queue)
-        try await connection.sendAsync(handshakeBytes)
-
-        // --- Read and validate the 6-byte echo header ---
-        let echoHeader = try await connection.receiveExactly(6)
-        guard echoHeader.prefix(4) == Data(magicBytes) else {
-            throw HotlineError.malformedReply(
-                reason: "bad tracker magic: expected HTRK, got \(echoHeader.prefix(4).map { String(format: "%02x", $0) }.joined())"
-            )
+        // The async NWConnection wrappers ignore task cancellation, so the
+        // only way to abort a stalled connect/read is to cancel the
+        // connection itself. The watchdog marks the flag *before* cancelling
+        // so the catch below can map the resulting read failure to .timedOut.
+        let timeoutFlag = TimeoutFlag()
+        let watchdog = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return   // cancelled = the fetch finished first
+            }
+            timeoutFlag.markFired()
+            connection.cancel()
         }
+        defer { watchdog.cancel() }
 
-        // --- Read the 8-byte message header ---
-        // UInt16 messageType | UInt16 dataSize | UInt16 serversInPacket | UInt16 totalServers
-        let msgHeader = try await connection.receiveExactly(8)
-        var cursor = ByteCursor(data: msgHeader)
-        let messageType: UInt16 = cursor.readBigEndian()
-        let _: UInt16 = cursor.readBigEndian()        // dataSize — not needed; we use entry count
-        let serversInPacket: UInt16 = cursor.readBigEndian()
-        let _: UInt16 = cursor.readBigEndian()        // totalServers — informational only
+        do {
+            return try await withTaskCancellationHandler {
+                try await connection.startAndWaitForReady(on: queue)
+                try await connection.sendAsync(handshakeBytes)
 
-        guard messageType == 1 else {
-            throw HotlineError.malformedReply(
-                reason: "unexpected tracker message type \(messageType); expected 1 (server list)"
-            )
+                // --- Read and validate the 6-byte echo header ---
+                let echoHeader = try await connection.receiveExactly(6)
+                guard echoHeader.prefix(4) == Data(magicBytes) else {
+                    throw HotlineError.malformedReply(
+                        reason: "bad tracker magic: expected HTRK, got \(echoHeader.prefix(4).map { String(format: "%02x", $0) }.joined())"
+                    )
+                }
+
+                // --- Read the 8-byte message header ---
+                // UInt16 messageType | UInt16 dataSize | UInt16 serversInPacket | UInt16 totalServers
+                let msgHeader = try await connection.receiveExactly(8)
+                var cursor = ByteCursor(data: msgHeader)
+                let messageType: UInt16 = cursor.readBigEndian()
+                let _: UInt16 = cursor.readBigEndian()        // dataSize — not needed; we use entry count
+                let serversInPacket: UInt16 = cursor.readBigEndian()
+                let _: UInt16 = cursor.readBigEndian()        // totalServers — informational only
+
+                guard messageType == 1 else {
+                    throw HotlineError.malformedReply(
+                        reason: "unexpected tracker message type \(messageType); expected 1 (server list)"
+                    )
+                }
+
+                // --- Read and decode the server entries ---
+                var servers: [TrackerServer] = []
+                servers.reserveCapacity(Int(serversInPacket))
+
+                for _ in 0..<serversInPacket {
+                    // Fixed-width prefix: ip(4) + port(2) + users(2) + unused(2) + nameLenByte(1) = 11 bytes
+                    let fixedHeader = try await connection.receiveExactly(11)
+                    var cursor = ByteCursor(data: fixedHeader)
+
+                    let octet1: UInt8 = cursor.readBigEndian()
+                    let octet2: UInt8 = cursor.readBigEndian()
+                    let octet3: UInt8 = cursor.readBigEndian()
+                    let octet4: UInt8 = cursor.readBigEndian()
+                    let address = "\(octet1).\(octet2).\(octet3).\(octet4)"
+
+                    let serverPort: UInt16 = cursor.readBigEndian()
+                    let users: UInt16      = cursor.readBigEndian()
+                    let _: UInt16          = cursor.readBigEndian()   // unused/padding
+                    let nameLen: UInt8     = cursor.readBigEndian()
+
+                    let nameData = nameLen > 0
+                        ? try await connection.receiveExactly(Int(nameLen))
+                        : Data()
+                    let name = String(data: nameData, encoding: stringEncoding) ?? ""
+
+                    // Description length byte
+                    let descLenData = try await connection.receiveExactly(1)
+                    let descLen = Int(descLenData[descLenData.startIndex])
+                    let descData = descLen > 0
+                        ? try await connection.receiveExactly(descLen)
+                        : Data()
+                    let description = String(data: descData, encoding: stringEncoding) ?? ""
+
+                    servers.append(TrackerServer(
+                        address: address,
+                        port: serverPort,
+                        users: users,
+                        name: name,
+                        description: description
+                    ))
+                }
+
+                return servers
+            } onCancel: {
+                // Caller-initiated cancellation (e.g. the browser window
+                // closed) also needs the connection torn down to unblock
+                // the pending read.
+                connection.cancel()
+            }
+        } catch {
+            if timeoutFlag.fired { throw HotlineError.timedOut }
+            throw error
         }
+    }
 
-        // --- Read and decode the server entries ---
-        var servers: [TrackerServer] = []
-        servers.reserveCapacity(Int(serversInPacket))
+    // MARK: - Timeout watchdog
 
-        for _ in 0..<serversInPacket {
-            // Fixed-width prefix: ip(4) + port(2) + users(2) + unused(2) + nameLenByte(1) = 11 bytes
-            let fixedHeader = try await connection.receiveExactly(11)
-            var cursor = ByteCursor(data: fixedHeader)
-
-            let octet1: UInt8 = cursor.readBigEndian()
-            let octet2: UInt8 = cursor.readBigEndian()
-            let octet3: UInt8 = cursor.readBigEndian()
-            let octet4: UInt8 = cursor.readBigEndian()
-            let address = "\(octet1).\(octet2).\(octet3).\(octet4)"
-
-            let serverPort: UInt16 = cursor.readBigEndian()
-            let users: UInt16      = cursor.readBigEndian()
-            let _: UInt16          = cursor.readBigEndian()   // unused/padding
-            let nameLen: UInt8     = cursor.readBigEndian()
-
-            let nameData = nameLen > 0
-                ? try await connection.receiveExactly(Int(nameLen))
-                : Data()
-            let name = String(data: nameData, encoding: stringEncoding) ?? ""
-
-            // Description length byte
-            let descLenData = try await connection.receiveExactly(1)
-            let descLen = Int(descLenData[descLenData.startIndex])
-            let descData = descLen > 0
-                ? try await connection.receiveExactly(descLen)
-                : Data()
-            let description = String(data: descData, encoding: stringEncoding) ?? ""
-
-            servers.append(TrackerServer(
-                address: address,
-                port: serverPort,
-                users: users,
-                name: name,
-                description: description
-            ))
-        }
-
-        return servers
+    /// One-shot, thread-safe flag the watchdog sets *before* cancelling the
+    /// connection, so the read path can tell a deadline-driven cancel apart
+    /// from a genuine network failure. Mirrors the `NSLock` box style used by
+    /// `ContinuationBox` in `NWConnectionAsync.swift`.
+    private final class TimeoutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didFire = false
+        func markFired() { lock.withLock { didFire = true } }
+        var fired: Bool { lock.withLock { didFire } }
     }
 
     // MARK: - Private constants
