@@ -40,6 +40,11 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
     /// behaviour they were saved with.
     public var useTLS: Bool
 
+    /// Lowercase-hex SHA-256 of the server's TLS leaf certificate the
+    /// user has trusted (trust-on-first-use pinning). `nil` until the
+    /// user accepts a self-signed cert. Old bookmarks decode to `nil`.
+    public var pinnedCertificateSHA256: String?
+
     public init(
         name: String,
         address: String,
@@ -50,7 +55,8 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         useDefaultUserInfo: Bool = true,
         autoConnectFavorite: Bool = false,
         assignFavoriteShortcut: Bool = false,
-        useTLS: Bool = false
+        useTLS: Bool = false,
+        pinnedCertificateSHA256: String? = nil
     ) {
         self.name = name
         self.address = address
@@ -62,12 +68,13 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         self.autoConnectFavorite = autoConnectFavorite
         self.assignFavoriteShortcut = assignFavoriteShortcut
         self.useTLS = useTLS
+        self.pinnedCertificateSHA256 = pinnedCertificateSHA256
     }
 
     private enum CodingKeys: String, CodingKey {
         case name, address, port, nickname, login, icon,
              useDefaultUserInfo, autoConnectFavorite,
-             assignFavoriteShortcut, useTLS
+             assignFavoriteShortcut, useTLS, pinnedCertificateSHA256
     }
 
     /// Hand-written decoder so v1 bookmark JSON (no `useTLS` key)
@@ -84,5 +91,7 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         self.autoConnectFavorite = try container.decode(Bool.self, forKey: .autoConnectFavorite)
         self.assignFavoriteShortcut = try container.decode(Bool.self, forKey: .assignFavoriteShortcut)
         self.useTLS = try container.decodeIfPresent(Bool.self, forKey: .useTLS) ?? false
+        self.pinnedCertificateSHA256 = try container.decodeIfPresent(
+            String.self, forKey: .pinnedCertificateSHA256)
     }
 }
