@@ -34,6 +34,11 @@ public enum HotlineError: Error, Sendable, Hashable {
     /// transaction. Callers can fall back to the legacy implementation
     /// or skip the operation; the wire transports it identically.
     case notImplemented
+
+    /// The server's TLS certificate was not trusted: the user declined a
+    /// self-signed cert, or a pinned certificate changed and re-trust was
+    /// cancelled.
+    case certificateNotTrusted
 }
 
 extension HotlineError: CustomStringConvertible {
@@ -58,6 +63,8 @@ extension HotlineError: CustomStringConvertible {
             return "permission denied"
         case .notImplemented:
             return "not implemented"
+        case .certificateNotTrusted:
+            return "certificate not trusted"
         }
     }
 
@@ -90,6 +97,8 @@ extension HotlineError: CustomStringConvertible {
             return "Your account doesn't have permission to do that."
         case .notImplemented:
             return "Heidrun doesn't support this yet."
+        case .certificateNotTrusted:
+            return "The server's security certificate wasn't trusted, so the connection was cancelled."
         }
     }
 }
