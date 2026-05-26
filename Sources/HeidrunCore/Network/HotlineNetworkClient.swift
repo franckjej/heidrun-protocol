@@ -65,7 +65,8 @@ public actor HotlineNetworkClient: HotlineClient {
     /// `login(...)` to get past the server's auth gate.
     public static func connect(
         settings: ConnectionSettings,
-        stringEncoding: String.Encoding = .macOSRoman
+        stringEncoding: String.Encoding = .macOSRoman,
+        trustEvaluator: CertificateTrustEvaluator? = nil
     ) async throws -> HotlineNetworkClient {
         let host = NWEndpoint.Host(settings.address)
         guard let port = NWEndpoint.Port(rawValue: settings.port) else {
@@ -80,17 +81,28 @@ public actor HotlineNetworkClient: HotlineClient {
         tcp.keepaliveIdle = 30
         tcp.keepaliveInterval = 10
         tcp.keepaliveCount = 3
-        // `tls: nil` is plain TCP; `tls: NWProtocolTLS.Options()` uses
-        // the system trust store with TLS 1.2 default minimum. The
-        // server side (NIOSSL, sibling port pair) sets the same floor,
-        // so any modern cert (Let's Encrypt / public CA) works without
-        // further wiring. Self-signed support is intentionally deferred.
-        let parameters = NWParameters(
-            tls: settings.useTLS ? NWProtocolTLS.Options() : nil,
-            tcp: tcp
-        )
-        let connection = NWConnection(host: host, port: port, using: parameters)
         let queue = DispatchQueue(label: "Heidrun.HotlineNetworkClient")
+        // `tls: nil` is plain TCP. For TLS we install a custom verify block
+        // (`TLSTrustVerifier`) so a pinned self-signed cert is accepted and an
+        // unknown one triggers the trust-on-first-use evaluator; a real CA cert
+        // still validates through the system trust store inside that block.
+        let acceptedBox = AcceptedFingerprintBox()
+        let parameters: NWParameters
+        if settings.useTLS {
+            let tlsOptions = NWProtocolTLS.Options()
+            TLSTrustVerifier.install(
+                on: tlsOptions,
+                host: settings.address,
+                port: settings.port,
+                pinned: settings.pinnedCertificateSHA256,
+                evaluator: trustEvaluator,
+                acceptedBox: acceptedBox,
+                queue: queue)
+            parameters = NWParameters(tls: tlsOptions, tcp: tcp)
+        } else {
+            parameters = NWParameters(tls: nil, tcp: tcp)
+        }
+        let connection = NWConnection(host: host, port: port, using: parameters)
         // Race the connect against an explicit 15s deadline. NWConnection's
         // `tcp.connectionTimeout` is documented but doesn't reliably flip
         // the connection to `.failed` for black-holed routes (firewall
@@ -106,15 +118,33 @@ public actor HotlineNetworkClient: HotlineClient {
                 connection.cancel()
                 throw HotlineError.notConnected
             }
-            try await group.next()
+            do {
+                try await group.next()
+            } catch {
+                group.cancelAll()
+                // A verify-block rejection fails the handshake without ever
+                // recording an accepted fingerprint — surface that as the
+                // clearer trust error rather than a generic network failure.
+                if settings.useTLS, acceptedBox.value == nil {
+                    throw HotlineError.certificateNotTrusted
+                }
+                throw error
+            }
             group.cancelAll()
         }
         try await Self.performHandshake(on: connection)
 
+        // Pin whatever the handshake accepted (the freshly-trusted fingerprint
+        // on first use, or the existing pin) so the transfer side-channel
+        // verifies strictly against it without prompting again.
+        var effectiveSettings = settings
+        if let accepted = acceptedBox.value {
+            effectiveSettings.pinnedCertificateSHA256 = accepted
+        }
         let client = HotlineNetworkClient(
             connection: connection,
             queue: queue,
-            settings: settings,
+            settings: effectiveSettings,
             stringEncoding: stringEncoding
         )
         await client.startReader()
