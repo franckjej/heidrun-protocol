@@ -517,9 +517,26 @@ extension HotlineNetworkClient {
             throw HotlineError.notConnected
         }
         let sideQueue = DispatchQueue(label: "Heidrun.transfer.\(transferID)")
-        let parameters: NWParameters = connectionSettings.useTLS
-            ? NWParameters(tls: NWProtocolTLS.Options(), tcp: NWProtocolTCP.Options())
-            : .tcp
+        let acceptedBox = AcceptedFingerprintBox()
+        let parameters: NWParameters
+        if connectionSettings.useTLS {
+            let tlsOptions = NWProtocolTLS.Options()
+            // evaluator: nil ⇒ strict. The control connection already
+            // established trust and pinned the fingerprint into
+            // connectionSettings, so the transfer cert (same server, +1 port)
+            // must match — no second prompt.
+            TLSTrustVerifier.install(
+                on: tlsOptions,
+                host: connectionSettings.address,
+                port: connectionSettings.port &+ 1,
+                pinned: connectionSettings.pinnedCertificateSHA256,
+                evaluator: nil,
+                acceptedBox: acceptedBox,
+                queue: sideQueue)
+            parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        } else {
+            parameters = .tcp
+        }
         let sideConnection = NWConnection(host: host, port: port, using: parameters)
         try await sideConnection.startAndWaitForReady(on: sideQueue)
 
