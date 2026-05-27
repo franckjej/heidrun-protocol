@@ -28,6 +28,11 @@ public actor HotlineNetworkClient: HotlineClient {
     private var nextTaskNumber: UInt32 = 1
     private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
     private var connectionSocket: UInt16 = 0
+    /// Latest public/main chat topic (TX 119 with Chat ID 0). Recorded
+    /// here in the read loop so a UI subscriber that starts after the
+    /// login-time push can still read the current topic via
+    /// `connectionInfo.publicChatSubject`.
+    private var publicChatSubject: String = ""
     private var protocolVersion: Int = 0
     private var serverVersion: Int = 0
     private var clientVersion: Int = 151
@@ -54,7 +59,8 @@ public actor HotlineNetworkClient: HotlineClient {
             serverVersion: serverVersion,
             connectionSocket: connectionSocket,
             lastTaskNumber: nextTaskNumber &- 1,
-            settings: connectionSettings
+            settings: connectionSettings,
+            publicChatSubject: publicChatSubject
         )
     }
 
@@ -286,10 +292,16 @@ public actor HotlineNetworkClient: HotlineClient {
 
         case .privateChatChangedSubject:
             guard let ref = fields.first(.chatReference) else { return }
-            broadcaster.yield(.privateChatSubjectChanged(
-                chat: ChatID(data: ref.data),
-                subject: fields.string(.chatSubject, encoding: stringEncoding) ?? ""
-            ))
+            let chat = ChatID(data: ref.data)
+            let newSubject = fields.string(.chatSubject, encoding: stringEncoding) ?? ""
+            // Record the public/main chat topic (Chat ID 0) so a UI
+            // subscriber that starts observing after this push (e.g. the
+            // login-time topic push) can still seed its header from
+            // `connectionInfo.publicChatSubject`.
+            if chat.rawValue == 0 {
+                publicChatSubject = newSubject
+            }
+            broadcaster.yield(.privateChatSubjectChanged(chat: chat, subject: newSubject))
 
         case .transferQueueUpdate:
             broadcaster.yield(.transferQueueUpdated)
