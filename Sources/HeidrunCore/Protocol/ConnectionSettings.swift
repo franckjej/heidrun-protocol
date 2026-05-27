@@ -45,6 +45,11 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
     /// user accepts a self-signed cert. Old bookmarks decode to `nil`.
     public var pinnedCertificateSHA256: String?
 
+    /// **Heidrun extension.** UTF-8 emoji avatar the user chose for this
+    /// favourite, or `nil` to use the numeric `icon`. Old bookmarks decode
+    /// to `nil`.
+    public var emoji: String?
+
     public init(
         name: String,
         address: String,
@@ -56,7 +61,8 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         autoConnectFavorite: Bool = false,
         assignFavoriteShortcut: Bool = false,
         useTLS: Bool = false,
-        pinnedCertificateSHA256: String? = nil
+        pinnedCertificateSHA256: String? = nil,
+        emoji: String? = nil
     ) {
         self.name = name
         self.address = address
@@ -69,12 +75,13 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         self.assignFavoriteShortcut = assignFavoriteShortcut
         self.useTLS = useTLS
         self.pinnedCertificateSHA256 = pinnedCertificateSHA256
+        self.emoji = emoji
     }
 
     private enum CodingKeys: String, CodingKey {
         case name, address, port, nickname, login, icon,
              useDefaultUserInfo, autoConnectFavorite,
-             assignFavoriteShortcut, useTLS, pinnedCertificateSHA256
+             assignFavoriteShortcut, useTLS, pinnedCertificateSHA256, emoji
     }
 
     /// Hand-written decoder so v1 bookmark JSON (no `useTLS` key)
@@ -93,5 +100,6 @@ public struct ConnectionSettings: Sendable, Hashable, Codable {
         self.useTLS = try container.decodeIfPresent(Bool.self, forKey: .useTLS) ?? false
         self.pinnedCertificateSHA256 = try container.decodeIfPresent(
             String.self, forKey: .pinnedCertificateSHA256)
+        self.emoji = try container.decodeIfPresent(String.self, forKey: .emoji)
     }
 }

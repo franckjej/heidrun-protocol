@@ -28,12 +28,26 @@ public enum UserListEntryCodec {
         guard cursor.remaining >= Int(length) else { return nil }
         let nickBytes = cursor.readData(count: Int(length))
         let nickname = String(data: nickBytes, encoding: encoding) ?? ""
+
+        // Heidrun extension: an optional `UInt16 emojiByteLen + UTF-8 bytes`
+        // block may follow the nick. Legacy entries stop here, so guard on
+        // remaining bytes. Always UTF-8, never `encoding`.
+        var emoji: String?
+        if cursor.remaining >= 2 {
+            let emojiLength: UInt16 = cursor.readBigEndian()
+            if emojiLength > 0, cursor.remaining >= Int(emojiLength) {
+                let emojiBytes = cursor.readData(count: Int(emojiLength))
+                emoji = String(data: emojiBytes, encoding: .utf8)
+            }
+        }
+
         return User(
             socket: socket,
             icon: icon,
             status: UserStatus(rawValue: status),
             privileges: [],
-            nickname: nickname
+            nickname: nickname,
+            emoji: emoji
         )
     }
 
@@ -49,6 +63,15 @@ public enum UserListEntryCodec {
         let nameBytes = user.nickname.data(using: encoding, allowLossyConversion: true) ?? Data()
         data.appendBigEndian(UInt16(clamping: nameBytes.count))
         data.append(nameBytes)
+
+        // Heidrun extension: append the emoji as `UInt16 len + UTF-8` only
+        // when present. Absent block == legacy layout == no emoji.
+        if let emoji = user.emoji, !emoji.isEmpty {
+            let emojiBytes = Data(emoji.utf8)
+            data.appendBigEndian(UInt16(clamping: emojiBytes.count))
+            data.append(emojiBytes)
+        }
+
         return PacketField(key: HotlineObjectKey.userListEntry, data: data)
     }
 }

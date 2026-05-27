@@ -21,18 +21,25 @@ public struct User: Sendable, Hashable, Identifiable {
     /// Display name.
     public var nickname: String
 
+    /// **Heidrun extension.** A UTF-8 emoji avatar the user picked, or
+    /// `nil` when they use the numeric `icon`. Carried by Heidrun servers
+    /// only; legacy peers leave this `nil`.
+    public var emoji: String?
+
     public init(
         socket: UInt16,
         icon: UInt16 = 0,
         status: UserStatus = .init(),
         privileges: UserPrivileges = [],
-        nickname: String = ""
+        nickname: String = "",
+        emoji: String? = nil
     ) {
         self.socket = socket
         self.icon = icon
         self.status = status
         self.privileges = privileges
         self.nickname = nickname
+        self.emoji = emoji
     }
 
     public var id: UInt16 { socket }
