@@ -26,6 +26,12 @@ Linux.
   the root Package.swift; `cd HeidrunTestServer && swift run` to use
   it.
 
+## Protocol extensions
+
+Heidrun layers a few non-standard extensions on top of base Hotline (e.g. emoji
+user avatars). They're additive and degrade gracefully to standard behaviour.
+The wire layouts are specified in [`docs/PROTOCOL-EXTENSIONS.md`](docs/PROTOCOL-EXTENSIONS.md).
+
 ## Using it
 
 ```swift
