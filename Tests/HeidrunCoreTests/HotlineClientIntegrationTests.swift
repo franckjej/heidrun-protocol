@@ -362,6 +362,61 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    @Test("a public chat subject push (TX 119, Chat ID 0) is recorded on connectionInfo")
+    func publicChatSubjectRecorded() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(
+                name: "test",
+                address: "127.0.0.1",
+                port: server.port
+            )
+        )
+        let sc = try await serverConnTask
+
+        // Wait for the decode to fire — the read loop records the topic
+        // before it yields the event, so once we see the event the
+        // recording has happened.
+        let eventTask = Task { () -> String? in
+            for await event in client.events {
+                if case let .privateChatSubjectChanged(_, subject) = event {
+                    return subject
+                }
+            }
+            return nil
+        }
+
+        try await sc.sendPush(
+            transactionID: 119,
+            fields: [
+                PacketField(key: .chatReference, data: Data([0, 0, 0, 0])),
+                .string(.chatSubject, "Heidrun's Inn")
+            ]
+        )
+
+        let received = try await withThrowingTaskGroup(of: String?.self) { group in
+            group.addTask { await eventTask.value }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                return nil
+            }
+            let first = try await group.next()
+            group.cancelAll()
+            return first
+        }
+        #expect(received == "Heidrun's Inn")
+
+        let info = await client.connectionInfo
+        #expect(info.publicChatSubject == "Heidrun's Inn")
+
+        eventTask.cancel()
+        await client.disconnect()
+        sc.close()
+    }
+
     @Test("login sends the userEmoji field as UTF-8")
     func loginSendsEmoji() async throws {
         let server = try await MiniHotlineServer.start()

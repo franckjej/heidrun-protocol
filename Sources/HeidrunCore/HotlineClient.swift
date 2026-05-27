@@ -22,13 +22,21 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
     /// The settings the user picked when they opened this connection.
     public var settings: ConnectionSettings
 
+    /// The most recent public/main chat topic the server pushed
+    /// (TX 119 `NotifyChatSubject` with Chat ID 0). Empty when the
+    /// server hasn't set one. Recorded by the read loop regardless of
+    /// whether a UI subscriber was listening — so a view that starts
+    /// observing after the login-time push can still seed its header.
+    public var publicChatSubject: String
+
     public init(
         clientVersion: Int,
         protocolVersion: Int,
         serverVersion: Int = 0,
         connectionSocket: UInt16,
         lastTaskNumber: UInt32,
-        settings: ConnectionSettings
+        settings: ConnectionSettings,
+        publicChatSubject: String = ""
     ) {
         self.clientVersion = clientVersion
         self.protocolVersion = protocolVersion
@@ -36,6 +44,7 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
         self.connectionSocket = connectionSocket
         self.lastTaskNumber = lastTaskNumber
         self.settings = settings
+        self.publicChatSubject = publicChatSubject
     }
 }
 
