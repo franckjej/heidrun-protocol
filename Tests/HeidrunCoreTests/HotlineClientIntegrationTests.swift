@@ -362,6 +362,61 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    @Test("login sends the userEmoji field as UTF-8")
+    func loginSendsEmoji() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+
+        async let serverWork: Void = {
+            let packet = try await sc.readPacket()
+            #expect(packet.header.transactionID == 107)
+            #expect(packet.fields.uint16(.icon) == 7)
+            #expect(packet.fields.string(.userEmoji, encoding: .utf8) == "🎸")
+            try await sc.sendReply(
+                transactionID: packet.header.transactionID,
+                taskNumber: packet.header.taskNumber
+            )
+        }()
+
+        try await client.login(name: "j", password: "p", nickname: "N", icon: 7, emoji: "🎸")
+        try await serverWork
+        await client.disconnect()
+        sc.close()
+    }
+
+    @Test("changeNickname sends emoji, and an empty string to clear it")
+    func changeNicknameSendsEmoji() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+
+        async let serverWork: Void = {
+            let setPkt = try await sc.readPacket()
+            #expect(setPkt.header.transactionID == 304)
+            #expect(setPkt.fields.string(.userEmoji, encoding: .utf8) == "🎸")
+            let clearPkt = try await sc.readPacket()
+            #expect(clearPkt.header.transactionID == 304)
+            #expect(clearPkt.fields.string(.userEmoji, encoding: .utf8) == "")
+        }()
+
+        try await client.changeNickname("N", icon: 7, emoji: "🎸", persist: false)
+        try await client.changeNickname("N", icon: 7, emoji: "", persist: false)
+        try await serverWork
+        await client.disconnect()
+        sc.close()
+    }
+
     // MARK: - Helpers
 
     /// Encode a userListEntry blob the way Hotline puts it on the wire.

@@ -430,14 +430,18 @@ public actor HotlineNetworkClient: HotlineClient {
         try await sendNoReply(transactionID: 500, fields: [])
     }
 
-    public func login(name: String, password: String, nickname: String, icon: UInt16) async throws {
-        let fields: [PacketField] = [
+    public func login(
+        name: String, password: String, nickname: String,
+        icon: UInt16, emoji: String? = nil
+    ) async throws {
+        var fields: [PacketField] = [
             .obfuscatedString(.login, name, encoding: stringEncoding),
             .obfuscatedString(.password, password, encoding: stringEncoding),
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
             .uint16(.clientVersion, UInt16(clientVersion))
         ]
+        if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         let reply = try await sendExpectingReply(transactionID: 107, fields: fields)
         if let server = reply.uint16(.clientVersion) {
             self.serverVersion = Int(server)
@@ -454,18 +458,24 @@ public actor HotlineNetworkClient: HotlineClient {
         startKeepalive()
     }
 
-    public func agreeToAgreement(nickname: String, icon: UInt16) async throws {
-        let fields: [PacketField] = [
+    public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
+        var fields: [PacketField] = [
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon)
         ]
+        if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         try await sendNoReply(transactionID: 121, fields: fields)
     }
 
-    public func changeNickname(_ nickname: String, icon: UInt16, persist: Bool) async throws {
+    public func changeNickname(
+        _ nickname: String, icon: UInt16, emoji: String? = nil, persist: Bool
+    ) async throws {
+        // Always send userEmoji on a profile change so the server can tell
+        // "cleared" (empty string) from "set". Default "" clears.
         let fields: [PacketField] = [
             .string(.nickname, nickname, encoding: stringEncoding),
-            .uint16(.icon, icon)
+            .uint16(.icon, icon),
+            .string(.userEmoji, emoji ?? "", encoding: .utf8)
         ]
         try await sendNoReply(transactionID: 304, fields: fields)
     }

@@ -144,21 +144,25 @@ public protocol HotlineClient: Sendable {
     /// Send the protocol-defined keep-alive ping (transaction 185).
     func sendPing() async throws
 
-    /// Authenticate against the server.
+    /// Authenticate against the server. `emoji` is a Heidrun extension —
+    /// an optional UTF-8 emoji avatar sent alongside the numeric `icon`.
     func login(
         name: String,
         password: String,
         nickname: String,
-        icon: UInt16
+        icon: UInt16,
+        emoji: String?
     ) async throws
 
     /// Acknowledge the server's agreement banner.
-    func agreeToAgreement(nickname: String, icon: UInt16) async throws
+    func agreeToAgreement(nickname: String, icon: UInt16, emoji: String?) async throws
 
-    /// Update our own profile in the user list.
+    /// Update our own profile in the user list. `emoji` (Heidrun extension)
+    /// is always sent: a value sets it, an empty string clears it.
     func changeNickname(
         _ nickname: String,
         icon: UInt16,
+        emoji: String?,
         persist: Bool
     ) async throws
 
