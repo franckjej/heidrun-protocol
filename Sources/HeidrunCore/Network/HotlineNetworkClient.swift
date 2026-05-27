@@ -300,7 +300,8 @@ public actor HotlineNetworkClient: HotlineClient {
                 icon: fields.uint16(.icon) ?? 0,
                 status: UserStatus(rawValue: fields.uint16(.status) ?? 0),
                 privileges: [],
-                nickname: fields.string(.nickname, encoding: stringEncoding) ?? ""
+                nickname: fields.string(.nickname, encoding: stringEncoding) ?? "",
+                emoji: fields.string(.userEmoji, encoding: .utf8)
             )
             broadcaster.yield(.userChanged(user: user))
 
@@ -499,7 +500,8 @@ public actor HotlineNetworkClient: HotlineClient {
             icon: reply.uint16(.icon) ?? 0,
             status: UserStatus(rawValue: reply.uint16(.status) ?? 0),
             privileges: [],
-            nickname: reply.string(.nickname, encoding: stringEncoding) ?? ""
+            nickname: reply.string(.nickname, encoding: stringEncoding) ?? "",
+            emoji: reply.string(.userEmoji, encoding: .utf8)
         )
         let accountLogin = Self.decodeLoginField(reply.first(.login), encoding: stringEncoding)
         let infoText = reply.string(.message, encoding: stringEncoding) ?? ""

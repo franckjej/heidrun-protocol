@@ -417,6 +417,37 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    @Test("userChanged push decodes the userEmoji field")
+    func userChangedDecodesEmoji() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+        let events = client.events   // subscribe before the push
+
+        try await sc.sendPush(transactionID: 301, fields: [
+            .uint16(.socket, 9),
+            .uint16(.icon, 3),
+            .uint16(.status, 0),
+            .string(.nickname, "Frank", encoding: .macOSRoman),
+            .string(.userEmoji, "🎸", encoding: .utf8)
+        ])
+
+        var received: User?
+        for await event in events {
+            if case let .userChanged(user) = event { received = user; break }
+        }
+        #expect(received?.socket == 9)
+        #expect(received?.emoji == "🎸")
+
+        await client.disconnect()
+        sc.close()
+    }
+
     // MARK: - Helpers
 
     /// Encode a userListEntry blob the way Hotline puts it on the wire.
