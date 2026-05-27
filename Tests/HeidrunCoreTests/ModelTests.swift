@@ -73,4 +73,15 @@ struct ModelTests {
     func newsCapabilityThreshold(version: Int, expected: NewsCapability) {
         #expect(NewsCapability(serverVersion: version) == expected)
     }
+
+    @Test("User carries an optional emoji avatar, defaulting to nil")
+    func userEmojiDefaultsNil() {
+        #expect(User(socket: 1).emoji == nil)
+        #expect(User(socket: 1, emoji: "😀").emoji == "😀")
+    }
+
+    @Test("userEmoji object key is the Heidrun extension base 0xE000")
+    func userEmojiKeyValue() {
+        #expect(HotlineObjectKey.userEmoji.rawValue == 0xE000)
+    }
 }

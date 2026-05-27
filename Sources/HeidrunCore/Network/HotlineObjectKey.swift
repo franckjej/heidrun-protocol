@@ -46,6 +46,14 @@ public enum HotlineObjectKey: UInt16, Sendable, Hashable, CaseIterable {
 
     case userListEntry      = 300
 
+    /// **Heidrun extension** (not standard Hotline). A UTF-8 emoji the
+    /// user picked as their avatar, sent alongside the numeric `icon` on
+    /// login (107) / agree (121) / changeNickname (304) and appended to the
+    /// user-list entry (300). `0xE000` is the base of the Heidrun extension
+    /// band, well clear of standard Hotline keys. Always UTF-8, never the
+    /// connection's `stringEncoding`.
+    case userEmoji          = 0xE000
+
     // Threaded news
     case newsThreadList     = 321
     case newsCategoryName   = 322
