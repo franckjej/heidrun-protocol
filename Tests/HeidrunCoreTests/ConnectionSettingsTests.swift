@@ -44,4 +44,26 @@ struct ConnectionSettingsTests {
         #expect(decoded.pinnedCertificateSHA256 == nil)
         #expect(decoded.useTLS == false)
     }
+
+    @Test("emoji defaults to nil and round-trips through Codable")
+    func emojiCodableRoundTrip() throws {
+        var settings = ConnectionSettings(name: "s", address: "host")
+        #expect(settings.emoji == nil)
+        settings.emoji = "🎸"
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(ConnectionSettings.self, from: data)
+        #expect(decoded.emoji == "🎸")
+    }
+
+    @Test("legacy bookmark JSON without an emoji key decodes to nil")
+    func legacyJSONDecodesEmojiNil() throws {
+        let json = #"""
+        {"name":"s","address":"host","port":5500,"nickname":"","login":"",
+         "icon":0,"useDefaultUserInfo":true,"autoConnectFavorite":false,
+         "assignFavoriteShortcut":false}
+        """#
+        let decoded = try JSONDecoder().decode(
+            ConnectionSettings.self, from: Data(json.utf8))
+        #expect(decoded.emoji == nil)
+    }
 }
