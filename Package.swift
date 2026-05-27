@@ -22,7 +22,7 @@ let package = Package(
             ]
         ),
         .testTarget(name: "HeidrunCoreTests", dependencies: ["HeidrunCore"]),
-        .testTarget(name: "HeidrunNIOClientTests", dependencies: ["HeidrunNIOClient"])
+        .testTarget(name: "HeidrunNIOClientTests", dependencies: ["HeidrunNIOClient", "HeidrunCore"])
     ],
     swiftLanguageModes: [.v6]
 )

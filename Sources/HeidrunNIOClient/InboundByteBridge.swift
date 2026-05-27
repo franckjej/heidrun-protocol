@@ -33,8 +33,11 @@ final class InboundByteBridge: ChannelInboundHandler, @unchecked Sendable {
 
 /// Pulls from the inbound `AsyncStream<Data>` and serves exact-length reads —
 /// the one read primitive the packet loop needs. Single-consumer: only the
-/// handshake and the read loop call `receiveExactly`, never concurrently.
-final class ByteAccumulator {
+/// handshake and then the read loop call `receiveExactly`, strictly serially
+/// and never concurrently, so the mutable state needs no locking. `@unchecked
+/// Sendable` so the owning actor can `await` it without tripping the
+/// non-Sendable sending check.
+final class ByteAccumulator: @unchecked Sendable {
     private var iterator: AsyncStream<Data>.AsyncIterator
     private var leftover = Data()
 
