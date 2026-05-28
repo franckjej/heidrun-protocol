@@ -162,15 +162,26 @@ struct Heidrun: AsyncParsableCommand {
     }
 
     private func printUsers(_ users: [User]) {
-        let header = String(format: "%5s  %-24s  %s\n", "sock", "nickname", "status")
+        // Swift's String(format:) is unsafe with `%s` — it expects a C
+        // string (UnsafePointer<CChar>), and a bridged Swift String
+        // walks strlen into garbage. Use interpolation + padding.
+        let header = pad("sock", 5, alignRight: true)
+            + "  " + pad("nickname", 24)
+            + "  " + "status\n"
         FileHandle.standardOutput.write(Data(header.utf8))
         for user in users.sorted(by: { $0.nickname < $1.nickname }) {
-            let line = String(format: "%5d  %-24s  %s\n",
-                              user.socket,
-                              user.nickname,
-                              describeStatus(user.status))
+            let line = pad("\(user.socket)", 5, alignRight: true)
+                + "  " + pad(user.nickname, 24)
+                + "  " + describeStatus(user.status)
+                + "\n"
             FileHandle.standardOutput.write(Data(line.utf8))
         }
+    }
+
+    private func pad(_ value: String, _ width: Int, alignRight: Bool = false) -> String {
+        if value.count >= width { return value }
+        let filler = String(repeating: " ", count: width - value.count)
+        return alignRight ? filler + value : value + filler
     }
 
     private func describeStatus(_ status: UserStatus) -> String {
