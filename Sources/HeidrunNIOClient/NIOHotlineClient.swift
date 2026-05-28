@@ -221,6 +221,61 @@ public actor NIOHotlineClient {
         try await send(transactionID: 500, fields: [], expectsReply: false)
     }
 
+    public func fetchUserInfo(socket: UInt16) async throws -> UserInfo {
+        let reply = try await send(
+            transactionID: 303,
+            fields: [.uint16(.socket, socket)],
+            expectsReply: true
+        )
+        let user = User(
+            socket: socket,
+            icon: reply.uint16(.icon) ?? 0,
+            status: UserStatus(rawValue: reply.uint16(.status) ?? 0),
+            privileges: [],
+            nickname: reply.string(.nickname, encoding: stringEncoding) ?? "",
+            emoji: reply.string(.userEmoji, encoding: .utf8)
+        )
+        let accountLogin = Self.decodeLoginField(reply.first(.login), encoding: stringEncoding)
+        let infoText = reply.string(.message, encoding: stringEncoding) ?? ""
+        return UserInfo(user: user, accountLogin: accountLogin, infoText: infoText)
+    }
+
+    public func sendPrivateMessage(_ message: String, to socket: UInt16) async throws {
+        try await send(
+            transactionID: 108,
+            fields: [
+                .uint16(.socket, socket),
+                .string(.message, message, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+    }
+
+    /// Mirrors `HotlineNetworkClient.decodeLoginField` — the `login`
+    /// field on a 303 reply may or may not be XOR-obfuscated depending
+    /// on server flavour, so we sniff the high-bit distribution and
+    /// pick the right decoder. Duplicated rather than shared to keep
+    /// the cross-platform NIO module from depending on the Darwin
+    /// Network/ folder.
+    private static func decodeLoginField(
+        _ field: PacketField?,
+        encoding: String.Encoding
+    ) -> String {
+        guard let field, !field.data.isEmpty else { return "" }
+        let highBitCount = field.data.reduce(0) { count, byte in
+            byte >= 0x80 ? count + 1 : count
+        }
+        let looksObfuscated = highBitCount * 2 > field.data.count
+        if looksObfuscated {
+            var bytes = field.data
+            for index in bytes.indices {
+                bytes[index] = bytes[index] ^ 0xFF
+            }
+            return String(data: bytes, encoding: encoding) ?? ""
+        }
+        return String(data: field.data, encoding: encoding) ?? ""
+    }
+
     // MARK: Keepalive + teardown
 
     private func startKeepalive() {
