@@ -208,6 +208,36 @@ struct Heidrun: AsyncParsableCommand {
             let parentPath = RemotePath(components: Array(components.dropLast()))
             let info = try await client.fetchFileInfo(at: parentPath, name: name)
             printFileInfo(info)
+        case "tnews":
+            // Threaded news (Hotline 1.5+). Argument optional → root.
+            let path = parseRemotePath(argument)
+            let bundles = try await client.fetchNewsBundles(at: path)
+            printNewsBundles(bundles, atPath: path)
+        case "tthreads":
+            // Threads inside a category. Argument required.
+            let path = parseRemotePath(argument)
+            guard !path.isRoot else {
+                FileHandle.standardError.write(Data("usage: /tthreads <category-path>\n".utf8))
+                return true
+            }
+            let threads = try await client.fetchNewsThreads(at: path)
+            printNewsThreads(threads, inCategory: path)
+        case "tread":
+            // Read one thread body. `/tread <category-path> <threadID>`.
+            let pieces = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2,
+                  let threadID = UInt16(pieces[1].trimmingCharacters(in: .whitespaces))
+            else {
+                FileHandle.standardError.write(Data("usage: /tread <category-path> <threadID>\n".utf8))
+                return true
+            }
+            let path = parseRemotePath(String(pieces[0]))
+            guard !path.isRoot else {
+                FileHandle.standardError.write(Data("usage: /tread <category-path> <threadID>\n".utf8))
+                return true
+            }
+            let thread = try await client.fetchNewsThread(at: path, threadID: threadID, type: ThreadElement.plainTextType)
+            printNewsThread(thread)
         default:
             // Not a client builtin — forward to the server. heidrun-server
             // exposes commands like `/topic` as leading-slash chat its
@@ -231,6 +261,9 @@ struct Heidrun: AsyncParsableCommand {
           /finfo <path/file>     file metadata (size, type/creator, dates, comment)
           /news                  read the plain news feed
           /post <text>           append to the plain news feed
+          /tnews [path]          threaded news: list bundles at <path>
+          /tthreads <path>       threaded news: list threads in a category
+          /tread <path> <id>     threaded news: show one thread body
 
           /help                  this help
           /quit                  disconnect and exit
@@ -303,6 +336,61 @@ struct Heidrun: AsyncParsableCommand {
         created:  \(created)
         modified: \(modified)
         comment:  \(normalizeLineEndings(comment))
+
+        """
+        FileHandle.standardOutput.write(Data(text.utf8))
+    }
+
+    private func printNewsBundles(_ bundles: [NewsBundle], atPath path: RemotePath) {
+        let location = path.isRoot ? "/" : "/" + path.components.joined(separator: "/")
+        FileHandle.standardError.write(Data("→ \(bundles.count) bundle\(bundles.count == 1 ? "" : "s") at \(location)\n".utf8))
+        if bundles.isEmpty { return }
+        let header = pad("kind", 10) + "  name\n"
+        FileHandle.standardOutput.write(Data(header.utf8))
+        for bundle in bundles.sorted(by: { $0.title < $1.title }) {
+            let kind = bundle.kind == .category ? "category" : "folder"
+            let suffix = bundle.kind == .category ? "" : "/"
+            FileHandle.standardOutput.write(Data((pad(kind, 10) + "  " + bundle.title + suffix + "\n").utf8))
+        }
+    }
+
+    private func printNewsThreads(_ threads: [NewsThread], inCategory path: RemotePath) {
+        let location = "/" + path.components.joined(separator: "/")
+        FileHandle.standardError.write(Data("→ \(threads.count) thread\(threads.count == 1 ? "" : "s") in \(location)\n".utf8))
+        if threads.isEmpty { return }
+        let header = pad("id", 6, alignRight: true)
+            + "  " + pad("author", 16)
+            + "  " + pad("date", 10)
+            + "  subject\n"
+        FileHandle.standardOutput.write(Data(header.utf8))
+        let dayFormatter = ISO8601DateFormatter()
+        dayFormatter.formatOptions = [.withFullDate]
+        let sorted = threads.sorted { $0.postDate > $1.postDate }
+        for thread in sorted {
+            let element = thread.elements.first
+            let subject = element?.title ?? "(no subject)"
+            let author = element?.author ?? "—"
+            let date = thread.postDate == .distantPast ? "—" : dayFormatter.string(from: thread.postDate)
+            let line = pad("\(thread.threadID)", 6, alignRight: true)
+                + "  " + pad(author, 16)
+                + "  " + pad(date, 10)
+                + "  " + subject + "\n"
+            FileHandle.standardOutput.write(Data(line.utf8))
+        }
+    }
+
+    private func printNewsThread(_ thread: NewsThread) {
+        guard let element = thread.elements.first else {
+            FileHandle.standardError.write(Data("(thread has no body)\n".utf8))
+            return
+        }
+        let dateFormatter = ISO8601DateFormatter()
+        let date = thread.postDate == .distantPast ? "—" : dateFormatter.string(from: thread.postDate)
+        let text = """
+        title:  \(element.title)
+        by:     \(element.author) on \(date)
+        ---
+        \(normalizeLineEndings(element.body))
 
         """
         FileHandle.standardOutput.write(Data(text.utf8))

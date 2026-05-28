@@ -337,6 +337,69 @@ public actor NIOHotlineClient {
         )
     }
 
+    // MARK: Threaded news (Hotline 1.5+ servers)
+
+    /// List the news bundles (folders + categories) at the given
+    /// `newsPath`. Root = empty path. TX 370 reply carries 0+
+    /// `.newsBundleEntry` blobs decoded by `NewsBundleEntryCodec`.
+    public func fetchNewsBundles(at path: RemotePath) async throws -> [NewsBundle] {
+        let reply = try await send(
+            transactionID: 370,
+            fields: [.path(.newsPath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        return reply
+            .filter { $0.key == HotlineObjectKey.newsBundleEntry.rawValue }
+            .compactMap { NewsBundleEntryCodec.decode($0.data, encoding: stringEncoding) }
+    }
+
+    /// List the threads inside a category at the given `newsPath`. TX
+    /// 371 reply carries a single `.newsThreadList` blob decoded by
+    /// `NewsThreadListCodec` into a flat array of threads (the
+    /// parent-id field is what makes the tree structure).
+    public func fetchNewsThreads(at path: RemotePath) async throws -> [NewsThread] {
+        let reply = try await send(
+            transactionID: 371,
+            fields: [.path(.newsPath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        guard let blob = reply.first(.newsThreadList) else { return [] }
+        return NewsThreadListCodec.decode(blob.data, encoding: stringEncoding)
+    }
+
+    /// Fetch a single thread's body. TX 400 takes the category path,
+    /// the article id, and the requested element MIME type. Reply
+    /// carries parent/post-date + a single thread element (title +
+    /// author + body). Mirrors the Darwin-side decoder so the body
+    /// pane on any UI gets the same shape.
+    public func fetchNewsThread(at path: RemotePath, threadID: UInt16, type: String) async throws -> NewsThread {
+        let reply = try await send(
+            transactionID: 400,
+            fields: [
+                .path(.newsPath, path, encoding: stringEncoding),
+                .uint16(.newsArticleID, threadID),
+                .string(.newsType, type, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        let parentID = reply.uint16(.newsParentThread) ?? 0
+        let postDate = reply.date(.newsDate) ?? Date.distantPast
+        var elements: [ThreadElement] = []
+        let elementTitle = reply.string(.newsTitle, encoding: stringEncoding)
+        let elementBody = reply.string(.newsData, encoding: stringEncoding)
+        if elementTitle != nil || elementBody != nil {
+            let bodyBytes = reply.first(.newsData)?.data.count ?? 0
+            elements.append(ThreadElement(
+                title: elementTitle ?? "",
+                author: reply.string(.newsAuthor, encoding: stringEncoding) ?? "",
+                mimeType: reply.string(.newsType, encoding: stringEncoding) ?? ThreadElement.plainTextType,
+                size: UInt16(clamping: bodyBytes),
+                body: elementBody ?? ""
+            ))
+        }
+        return NewsThread(threadID: threadID, parentID: parentID, postDate: postDate, elements: elements)
+    }
+
     /// Mirrors `HotlineNetworkClient.decodeLoginField` — the `login`
     /// field on a 303 reply may or may not be XOR-obfuscated depending
     /// on server flavour, so we sniff the high-bit distribution and

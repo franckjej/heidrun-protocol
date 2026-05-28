@@ -270,5 +270,113 @@ struct NIOHotlineClientIntegrationTests {
         try await serverSide
         await client.disconnect()
     }
+
+    @Test("fetchNewsBundles sends TX 370 with newsPath and decodes the entries")
+    func fetchNewsBundlesRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let bundlesPacket = try await conn.readPacket()
+            #expect(bundlesPacket.header.transactionID == 370)
+            #expect(bundlesPacket.fields.first(.newsPath) != nil)
+            try await conn.sendReply(
+                transactionID: 370,
+                taskNumber: bundlesPacket.header.taskNumber,
+                fields: [
+                    NewsBundleEntryCodec.encode(name: "Software", kind: .bundle, itemCount: 5),
+                    NewsBundleEntryCodec.encode(name: "Announcements", kind: .category, itemCount: 12)
+                ]
+            )
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        let bundles = try await client.fetchNewsBundles(at: RemotePath())
+        #expect(bundles.count == 2)
+        #expect(bundles.contains { $0.title == "Software" && $0.kind == .bundle })
+        #expect(bundles.contains { $0.title == "Announcements" && $0.kind == .category })
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("fetchNewsThreads sends TX 371 and decodes the newsThreadList blob")
+    func fetchNewsThreadsRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        let posted = Date(timeIntervalSince1970: 1_716_900_000)
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let threadsPacket = try await conn.readPacket()
+            #expect(threadsPacket.header.transactionID == 371)
+            let entries = [
+                NewsThreadListEntry(threadID: 1, parentID: 0, postedAt: posted, title: "Hello world", author: "alice", body: "first post"),
+                NewsThreadListEntry(threadID: 2, parentID: 1, postedAt: posted, title: "Re: Hello world", author: "bob", body: "reply")
+            ]
+            try await conn.sendReply(
+                transactionID: 371,
+                taskNumber: threadsPacket.header.taskNumber,
+                fields: [NewsThreadListCodec.encode(entries, encoding: .macOSRoman)]
+            )
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        let threads = try await client.fetchNewsThreads(at: RemotePath(components: ["Announcements"]))
+        #expect(threads.count == 2)
+        #expect(threads.contains { $0.threadID == 1 && $0.elements.first?.title == "Hello world" && $0.elements.first?.author == "alice" })
+        #expect(threads.contains { $0.threadID == 2 && $0.parentID == 1 && $0.elements.first?.author == "bob" })
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("fetchNewsThread sends TX 400 and decodes the body element")
+    func fetchNewsThreadRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let threadPacket = try await conn.readPacket()
+            #expect(threadPacket.header.transactionID == 400)
+            #expect(threadPacket.fields.uint16(.newsArticleID) == 7)
+            try await conn.sendReply(
+                transactionID: 400,
+                taskNumber: threadPacket.header.taskNumber,
+                fields: [
+                    .uint16(.newsParentThread, 0),
+                    .string(.newsTitle, "Hello world", encoding: .macOSRoman),
+                    .string(.newsAuthor, "alice", encoding: .macOSRoman),
+                    .string(.newsType, ThreadElement.plainTextType, encoding: .macOSRoman),
+                    .string(.newsData, "the body text", encoding: .macOSRoman)
+                ]
+            )
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        let thread = try await client.fetchNewsThread(
+            at: RemotePath(components: ["Announcements"]),
+            threadID: 7,
+            type: ThreadElement.plainTextType
+        )
+        #expect(thread.threadID == 7)
+        #expect(thread.elements.first?.title == "Hello world")
+        #expect(thread.elements.first?.author == "alice")
+        #expect(thread.elements.first?.body == "the body text")
+        try await serverSide
+        await client.disconnect()
+    }
 }
 #endif
