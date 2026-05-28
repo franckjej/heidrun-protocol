@@ -62,18 +62,32 @@ struct Heidrun: AsyncParsableCommand {
         // chat / PMs / join-leave to stdout while the main task reads
         // user commands on stdin. The two streams will interleave on a
         // shared TTY — acceptable for MVP, fixable later with readline.
+        //
+        // Same task also handles `agreementReceived`: many servers gate
+        // chat behind an agreement push (TX 109). We mirror what every
+        // GUI client does — print the agreement once, then auto-call
+        // `agreeToAgreement` so the user can actually type. If the
+        // operator wanted a hard manual gate they'd require an account.
         let eventStream = client.events
+        let nick = nickname
+        let iconID = icon
         let printerTask = Task {
             for await event in eventStream {
+                if case .agreementReceived(_, let autoAgree) = event, autoAgree {
+                    try? await client.agreeToAgreement(nickname: nick, icon: iconID, emoji: nil)
+                }
                 printEvent(event)
             }
         }
 
-        // Read stdin line-by-line. `readLine` is blocking but Task
-        // isolation keeps it off the NIO event loop. EOF (Ctrl-D)
-        // gracefully drops out of the loop and disconnects.
+        // Read stdin line-by-line through the in-tree LineEditor —
+        // raw-mode termios so arrow keys browse history rather than
+        // sending escape sequences into chat. Falls back to plain
+        // readLine() when stdin isn't a TTY (piped / redirected) so
+        // scripted usage still works.
+        let editor = LineEditor(historyURL: Self.historyURL())
         FileHandle.standardError.write(Data("→ chat ready. Type a message, or /help for commands.\n".utf8))
-        while let line = readLine(strippingNewline: true) {
+        while let line = editor.readLine(prompt: "> ") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             do {
@@ -87,6 +101,14 @@ struct Heidrun: AsyncParsableCommand {
         printerTask.cancel()
         await client.disconnect()
         FileHandle.standardError.write(Data("→ disconnected\n".utf8))
+    }
+
+    /// Per-user shell-history file. Lives next to the user's classic
+    /// dotfiles (`~/.heidrun_history`, mirroring `.bash_history` /
+    /// `.zsh_history`). Returns `nil` when we can't resolve $HOME —
+    /// the editor handles the nil and just skips persistence.
+    private static func historyURL() -> URL? {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".heidrun_history")
     }
 
     private func parseAddress(_ server: String) -> (host: String, port: UInt16) {
@@ -152,6 +174,40 @@ struct Heidrun: AsyncParsableCommand {
                 return true
             }
             try await client.changeNickname(trimmedNick, icon: icon, emoji: nil)
+        case "ls":
+            // Root by default; otherwise split a forward-slash path into
+            // RemotePath components. Mirrors the syntax users already
+            // know from the GUI's address bar.
+            let path = parseRemotePath(argument)
+            let entries = try await client.listFiles(at: path)
+            printFiles(entries, atPath: path)
+        case "news":
+            let feed = try await client.fetchNewsFeed()
+            if feed.isEmpty {
+                FileHandle.standardError.write(Data("(no news posted yet)\n".utf8))
+            } else {
+                let body = normalizeLineEndings(feed)
+                FileHandle.standardOutput.write(Data((body.hasSuffix("\n") ? body : body + "\n").utf8))
+            }
+        case "post":
+            let trimmedPost = argument.trimmingCharacters(in: .whitespaces)
+            guard !trimmedPost.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /post <text>\n".utf8))
+                return true
+            }
+            try await client.postPlainNews(trimmedPost)
+        case "finfo":
+            // file-info shortcut: forward-slash path with the last
+            // component as the filename. `/finfo foo.txt` looks up at
+            // root; `/finfo Software/Mac/foo.txt` walks the path.
+            let components = parseRemotePath(argument).components
+            guard let name = components.last, !name.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /finfo <path/file>\n".utf8))
+                return true
+            }
+            let parentPath = RemotePath(components: Array(components.dropLast()))
+            let info = try await client.fetchFileInfo(at: parentPath, name: name)
+            printFileInfo(info)
         default:
             // Not a client builtin — forward to the server. heidrun-server
             // exposes commands like `/topic` as leading-slash chat its
@@ -166,10 +222,16 @@ struct Heidrun: AsyncParsableCommand {
         let text = """
         client commands (intercepted locally):
           /who                   list users in the public room
-          /info <socket>         fetch a user's profile (use the socket from /who)
+          /info <socket>         fetch a user's profile
           /msg <socket> <text>   send a private message
           /me <action>           emote in public chat
           /nick <name>           change your nickname
+
+          /ls [path]             list files (root by default)
+          /finfo <path/file>     file metadata (size, type/creator, dates, comment)
+          /news                  read the plain news feed
+          /post <text>           append to the plain news feed
+
           /help                  this help
           /quit                  disconnect and exit
 
@@ -186,6 +248,82 @@ struct Heidrun: AsyncParsableCommand {
 
         """
         FileHandle.standardError.write(Data(text.utf8))
+    }
+
+    /// Hotline path syntax in the CLI mirrors what the GUI's address
+    /// bar shows: forward-slash separated. Leading / and empty
+    /// components are stripped so `/ls /Software/` works the same as
+    /// `/ls Software`.
+    private func parseRemotePath(_ raw: String) -> RemotePath {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return RemotePath() }
+        let components = trimmed
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        return RemotePath(components: components)
+    }
+
+    private func printFiles(_ files: [RemoteFile], atPath path: RemotePath) {
+        let location = path.isRoot ? "/" : "/" + path.components.joined(separator: "/")
+        FileHandle.standardError.write(Data("→ \(files.count) item\(files.count == 1 ? "" : "s") at \(location)\n".utf8))
+        if files.isEmpty { return }
+        let sorted = files.sorted { lhs, rhs in
+            let lhsFolder = lhs.type == .folder, rhsFolder = rhs.type == .folder
+            if lhsFolder != rhsFolder { return lhsFolder }
+            return lhs.name < rhs.name
+        }
+        let header = pad("name", 32) + "  " + pad("size", 10, alignRight: true) + "  type/creator\n"
+        FileHandle.standardOutput.write(Data(header.utf8))
+        for file in sorted {
+            let isFolder = file.type == .folder
+            let size = isFolder
+                ? "\(file.itemCount) item\(file.itemCount == 1 ? "" : "s")"
+                : formatBytes(UInt64(file.size))
+            let typeCreator = isFolder
+                ? "—"
+                : "\(file.type.stringValue)/\(file.creator.stringValue)"
+            let name = isFolder ? file.name + "/" : file.name
+            let line = pad(name, 32)
+                + "  " + pad(size, 10, alignRight: true)
+                + "  " + typeCreator + "\n"
+            FileHandle.standardOutput.write(Data(line.utf8))
+        }
+    }
+
+    private func printFileInfo(_ info: RemoteFileInfo) {
+        let dateStyle = ISO8601DateFormatter()
+        let created = info.creationDate.map(dateStyle.string(from:)) ?? "—"
+        let modified = info.modificationDate.map(dateStyle.string(from:)) ?? "—"
+        let comment = info.comment.flatMap { $0.isEmpty ? nil : $0 } ?? "—"
+        let text = """
+        name:     \(info.file.name)
+        size:     \(formatBytes(UInt64(info.file.size))) (\(info.file.size) bytes)
+        type:     \(info.file.type.stringValue)
+        creator:  \(info.file.creator.stringValue)
+        created:  \(created)
+        modified: \(modified)
+        comment:  \(normalizeLineEndings(comment))
+
+        """
+        FileHandle.standardOutput.write(Data(text.utf8))
+    }
+
+    /// Human-readable size — KB / MB / GB powers of 1024. Bytes for
+    /// anything below 1 KB.
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(bytes)
+        var index = 0
+        while value >= 1024, index < units.count - 1 {
+            value /= 1024
+            index += 1
+        }
+        if index == 0 { return "\(bytes) B" }
+        // %.1f is the formatting work; the unit gets concatenated via
+        // interpolation to avoid mixing format specifiers with Swift
+        // String args (a long-standing UB trap — see memory).
+        let formatted = String(format: "%.1f", value)
+        return formatted + units[index]
     }
 
     private func printUsers(_ users: [User]) {
@@ -249,10 +387,12 @@ struct Heidrun: AsyncParsableCommand {
             FileHandle.standardOutput.write(Data("[broadcast] \(normalizeLineEndings(message))\n".utf8))
         case .agreementReceived(let text, _):
             FileHandle.standardError.write(Data("→ server agreement:\n\(normalizeLineEndings(text))\n".utf8))
+        case .newsPosted(let text):
+            FileHandle.standardOutput.write(Data("[news] \(normalizeLineEndings(text))\n".utf8))
         case .disconnected(let reason):
             FileHandle.standardError.write(Data("→ disconnected (\(reason ?? "—"))\n".utf8))
         default:
-            // newsPosted, privateChat*, userListReceived, transferQueueUpdated:
+            // privateChat*, userListReceived, transferQueueUpdated:
             // not surfaced in stage-1 UX. Add when we extend the CLI.
             break
         }

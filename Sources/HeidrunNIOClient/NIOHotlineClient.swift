@@ -251,6 +251,92 @@ public actor NIOHotlineClient {
         )
     }
 
+    /// Acknowledge a server-pushed agreement. Required to clear the
+    /// "must agree" gate some servers put between login and chat —
+    /// without this the connection stays in limbo. TX 121, no reply.
+    public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
+        var fields: [PacketField] = [
+            .string(.nickname, nickname, encoding: stringEncoding),
+            .uint16(.icon, icon)
+        ]
+        if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
+        try await send(transactionID: 121, fields: fields, expectsReply: false)
+    }
+
+    /// List directory entries at the given remote path. Root = empty
+    /// `RemotePath`. TX 200 reply contains zero or more
+    /// `.fileListEntry` blobs, each decoded by `FileListEntryCodec`.
+    public func listFiles(at path: RemotePath) async throws -> [RemoteFile] {
+        let reply = try await send(
+            transactionID: 200,
+            fields: [.path(.filePath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        return reply
+            .filter { $0.key == HotlineObjectKey.fileListEntry.rawValue }
+            .compactMap { FileListEntryCodec.decode($0.data, encoding: stringEncoding) }
+    }
+
+    /// Fetch metadata for one file at `(path, name)`. TX 206 reply
+    /// carries longFileType / longFileCreator / size / creation +
+    /// modification dates / optional comment. Dates use the Hotline
+    /// 1904-epoch encoding decoded by `PacketField.date(_:)`.
+    public func fetchFileInfo(at path: RemotePath, name: String) async throws -> RemoteFileInfo {
+        let reply = try await send(
+            transactionID: 206,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        let typeFCC: HeidrunCore.FourCharCode = reply.first(.longFileType)
+            .map { Self.fourCharCode(from: $0.data) } ?? .file
+        let creatorFCC: HeidrunCore.FourCharCode = reply.first(.longFileCreator)
+            .map { Self.fourCharCode(from: $0.data) } ?? .unknown
+        let size = reply.uint32(.fileSize) ?? 0
+        return RemoteFileInfo(
+            file: RemoteFile(
+                name: reply.string(.fileName, encoding: stringEncoding) ?? name,
+                type: typeFCC,
+                creator: creatorFCC,
+                size: size,
+                itemCount: 0
+            ),
+            creationDate: reply.date(.fileCreationDate),
+            modificationDate: reply.date(.fileModificationDate),
+            comment: reply.string(.fileComment, encoding: stringEncoding),
+            dataForkSize: size,
+            resourceForkSize: 0
+        )
+    }
+
+    /// Big-endian 4-byte → `FourCharCode`. Mirrors the private helper
+    /// on `HotlineNetworkClient`. Pads with NUL when the field is
+    /// short (some servers send fewer bytes for `.unknown` creators).
+    private static func fourCharCode(from data: Data) -> HeidrunCore.FourCharCode {
+        let bytes = Array(data.prefix(4)) + Array(repeating: UInt8(0), count: max(0, 4 - data.count))
+        return HeidrunCore.FourCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+
+    /// Fetch the plain (bulletin-board) news feed. TX 101 reply
+    /// carries the whole feed as a single `.message` field.
+    public func fetchNewsFeed() async throws -> String {
+        let reply = try await send(transactionID: 101, fields: [], expectsReply: true)
+        return reply.string(.message, encoding: stringEncoding) ?? ""
+    }
+
+    /// Append one entry to the plain news feed. TX 103 (postNewNews),
+    /// the server inserts it at the top and pushes `.newsPosted` to
+    /// every connected client (already wired into the broadcaster).
+    public func postPlainNews(_ text: String) async throws {
+        try await send(
+            transactionID: 103,
+            fields: [.string(.message, text, encoding: stringEncoding)],
+            expectsReply: true
+        )
+    }
+
     /// Mirrors `HotlineNetworkClient.decodeLoginField` — the `login`
     /// field on a 303 reply may or may not be XOR-obfuscated depending
     /// on server flavour, so we sniff the high-bit distribution and
