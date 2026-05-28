@@ -97,49 +97,66 @@ struct Heidrun: AsyncParsableCommand {
     }
 
     /// Process a single REPL line. Returns `false` to drop out of the
-    /// loop (used by `/quit`). Bare text → public chat at Chat ID 0.
+    /// loop (used by `/quit`).
+    ///
+    /// Dispatch rule (IRC-style):
+    ///   `//foo`          → send literal `/foo` as public chat (escape hatch).
+    ///   `/<known>` …     → intercepted as a CLIENT command (see switch below).
+    ///   `/<other>` …     → forwarded to the SERVER as chat verbatim, so
+    ///                      server-side handlers like heidrun-server's
+    ///                      `/topic` get the raw line.
+    ///   bare text        → public chat at Chat ID 0.
     private func handle(input: String, client: NIOHotlineClient) async throws -> Bool {
-        if input.hasPrefix("/") {
-            let parts = input.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
-            let command = parts.first.map(String.init)?.lowercased() ?? ""
-            let argument = parts.count > 1 ? String(parts[1]) : ""
-            switch command {
-            case "quit", "exit", "q":
-                return false
-            case "help", "?":
-                printHelp()
-            case "who":
-                let users = try await client.fetchUserList()
-                printUsers(users)
-            case "info":
-                guard let socket = UInt16(argument.trimmingCharacters(in: .whitespaces)) else {
-                    FileHandle.standardError.write(Data("usage: /info <socket>\n".utf8))
-                    return true
-                }
-                let info = try await client.fetchUserInfo(socket: socket)
-                printUserInfo(info)
-            case "msg", "pm":
-                let pieces = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
-                guard pieces.count == 2,
-                      let socket = UInt16(pieces[0])
-                else {
-                    FileHandle.standardError.write(Data("usage: /msg <socket> <text>\n".utf8))
-                    return true
-                }
-                try await client.sendPrivateMessage(String(pieces[1]), to: socket)
-            case "me":
-                try await client.sendChat(argument, in: nil, isAction: true)
-            case "nick":
-                let trimmedNick = argument.trimmingCharacters(in: .whitespaces)
-                guard !trimmedNick.isEmpty else {
-                    FileHandle.standardError.write(Data("usage: /nick <new-name>\n".utf8))
-                    return true
-                }
-                try await client.changeNickname(trimmedNick, icon: icon, emoji: nil)
-            default:
-                FileHandle.standardError.write(Data("unknown command: /\(command). Try /help.\n".utf8))
+        // `//x` → "/x" as chat. Strip the leading `/`, send the rest.
+        if input.hasPrefix("//") {
+            try await client.sendChat(String(input.dropFirst()), in: nil, isAction: false)
+            return true
+        }
+        guard input.hasPrefix("/") else {
+            try await client.sendChat(input, in: nil, isAction: false)
+            return true
+        }
+        let parts = input.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+        let command = parts.first.map(String.init)?.lowercased() ?? ""
+        let argument = parts.count > 1 ? String(parts[1]) : ""
+        switch command {
+        case "quit", "exit", "q":
+            return false
+        case "help", "?":
+            printHelp()
+        case "who":
+            let users = try await client.fetchUserList()
+            printUsers(users)
+        case "info":
+            guard let socket = UInt16(argument.trimmingCharacters(in: .whitespaces)) else {
+                FileHandle.standardError.write(Data("usage: /info <socket>\n".utf8))
+                return true
             }
-        } else {
+            let info = try await client.fetchUserInfo(socket: socket)
+            printUserInfo(info)
+        case "msg", "pm":
+            let pieces = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2,
+                  let socket = UInt16(pieces[0])
+            else {
+                FileHandle.standardError.write(Data("usage: /msg <socket> <text>\n".utf8))
+                return true
+            }
+            try await client.sendPrivateMessage(String(pieces[1]), to: socket)
+        case "me":
+            try await client.sendChat(argument, in: nil, isAction: true)
+        case "nick":
+            let trimmedNick = argument.trimmingCharacters(in: .whitespaces)
+            guard !trimmedNick.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /nick <new-name>\n".utf8))
+                return true
+            }
+            try await client.changeNickname(trimmedNick, icon: icon, emoji: nil)
+        default:
+            // Not a client builtin — forward to the server. heidrun-server
+            // exposes commands like `/topic` as leading-slash chat its
+            // handler interprets; this lets users reach them without the
+            // CLI needing to know each one.
             try await client.sendChat(input, in: nil, isAction: false)
         }
         return true
@@ -147,7 +164,7 @@ struct Heidrun: AsyncParsableCommand {
 
     private func printHelp() {
         let text = """
-        commands:
+        client commands (intercepted locally):
           /who                   list users in the public room
           /info <socket>         fetch a user's profile (use the socket from /who)
           /msg <socket> <text>   send a private message
@@ -155,7 +172,17 @@ struct Heidrun: AsyncParsableCommand {
           /nick <name>           change your nickname
           /help                  this help
           /quit                  disconnect and exit
-        anything else is sent to the public chat.
+
+        anything else starting with / is sent to the server as chat,
+        so server-side commands (e.g. heidrun-server's /topic) work
+        without the client knowing about them.
+
+          /topic <subject>       server-side command (forwarded as chat)
+          //who                  send the literal text "/who" as chat
+                                 (escape hatch when a server command name
+                                 clashes with a client builtin)
+
+        bare lines go to the public chat at Chat ID 0.
 
         """
         FileHandle.standardError.write(Data(text.utf8))
@@ -211,17 +238,17 @@ struct Heidrun: AsyncParsableCommand {
         switch event {
         case .chatReceived(_, let message, let isAction):
             let prefix = isAction ? "* " : ""
-            FileHandle.standardOutput.write(Data("\(prefix)\(message)\n".utf8))
+            FileHandle.standardOutput.write(Data("\(prefix)\(normalizeLineEndings(message))\n".utf8))
         case .messageReceived(let from, let message):
-            FileHandle.standardOutput.write(Data("[pm \(from)] \(message)\n".utf8))
+            FileHandle.standardOutput.write(Data("[pm \(from)] \(normalizeLineEndings(message))\n".utf8))
         case .userChanged(let user):
             FileHandle.standardError.write(Data("→ \(user.nickname) (\(user.socket)) updated\n".utf8))
         case .userLeft(let socket):
             FileHandle.standardError.write(Data("→ socket \(socket) left\n".utf8))
         case .broadcastReceived(let message):
-            FileHandle.standardOutput.write(Data("[broadcast] \(message)\n".utf8))
+            FileHandle.standardOutput.write(Data("[broadcast] \(normalizeLineEndings(message))\n".utf8))
         case .agreementReceived(let text, _):
-            FileHandle.standardError.write(Data("→ server agreement:\n\(text)\n".utf8))
+            FileHandle.standardError.write(Data("→ server agreement:\n\(normalizeLineEndings(text))\n".utf8))
         case .disconnected(let reason):
             FileHandle.standardError.write(Data("→ disconnected (\(reason ?? "—"))\n".utf8))
         default:
@@ -229,5 +256,15 @@ struct Heidrun: AsyncParsableCommand {
             // not surfaced in stage-1 UX. Add when we extend the CLI.
             break
         }
+    }
+
+    /// Hotline uses classic Mac `\r` as the in-message line separator.
+    /// A modern terminal interprets bare `\r` as carriage-return-only,
+    /// which makes multi-line server replies overwrite themselves on
+    /// screen. Normalise CRLF and lone CRs to LF before we print.
+    private func normalizeLineEndings(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 }
