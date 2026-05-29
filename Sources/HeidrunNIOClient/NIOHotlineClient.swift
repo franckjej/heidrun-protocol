@@ -16,6 +16,9 @@ public actor NIOHotlineClient {
     private let broadcaster = EventBroadcaster()
     private let stringEncoding: String.Encoding
     private let settings: ConnectionSettings
+    /// Optional developer-console hook. See `PacketObserver` for
+    /// payload semantics. Same shape as on `HotlineNetworkClient`.
+    private let packetObserver: PacketObserver?
 
     private var nextTaskNumber: UInt32 = 1
     private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
@@ -26,11 +29,13 @@ public actor NIOHotlineClient {
     private var torn = false
 
     private init(channel: Channel, reader: ByteAccumulator,
-                 settings: ConnectionSettings, stringEncoding: String.Encoding) {
+                 settings: ConnectionSettings, stringEncoding: String.Encoding,
+                 packetObserver: PacketObserver? = nil) {
         self.channel = channel
         self.reader = reader
         self.settings = settings
         self.stringEncoding = stringEncoding
+        self.packetObserver = packetObserver
     }
 
     public nonisolated var events: AsyncStream<HotlineEvent> { broadcaster.makeStream() }
@@ -47,7 +52,8 @@ public actor NIOHotlineClient {
 
     public static func connect(
         settings: ConnectionSettings,
-        stringEncoding: String.Encoding = .macOSRoman
+        stringEncoding: String.Encoding = .macOSRoman,
+        packetObserver: PacketObserver? = nil
     ) async throws -> NIOHotlineClient {
         let (stream, continuation) = AsyncStream<Data>.makeStream()
         let bootstrap = ClientBootstrap(group: NIOSingletons.posixEventLoopGroup)
@@ -57,7 +63,8 @@ public actor NIOHotlineClient {
         let channel = try await bootstrap.connect(host: settings.address, port: Int(settings.port)).get()
         let reader = ByteAccumulator(stream: stream)
         let client = NIOHotlineClient(channel: channel, reader: reader,
-                                      settings: settings, stringEncoding: stringEncoding)
+                                      settings: settings, stringEncoding: stringEncoding,
+                                      packetObserver: packetObserver)
         try await client.performHandshake()
         await client.startReader()
         await client.startKeepalive()
@@ -107,6 +114,11 @@ public actor NIOHotlineClient {
 
     private func dispatch(header: PacketHeader, body: Data) {
         let fields = PacketCodec.decodeBody(body)
+        // Developer-console hook: every inbound packet, including
+        // replies and any TX IDs we don't recognise as either
+        // requests-we-sent or info-pushes. Lets a UI flag dialect
+        // traffic.
+        packetObserver?.handle(.inbound, header, fields)
 
         if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
             if header.errorID != 0 {
@@ -160,6 +172,19 @@ public actor NIOHotlineClient {
         let taskNumber = nextTaskID()
         let packet = PacketCodec.encode(classID: 0, transactionID: transactionID,
                                         taskNumber: taskNumber, fields: fields)
+        if let packetObserver {
+            // Header constructed from arguments since `PacketCodec.encode`
+            // doesn't return one. lengths populated for completeness.
+            let header = PacketHeader(
+                classID: 0,
+                transactionID: transactionID,
+                taskNumber: taskNumber,
+                errorID: 0,
+                dataLength: UInt32(packet.count),
+                totalLength: UInt32(packet.count)
+            )
+            packetObserver.handle(.outbound, header, fields)
+        }
         if expectsReply {
             return try await withCheckedThrowingContinuation { cont in
                 pendingReplies[taskNumber] = cont
