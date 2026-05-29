@@ -24,6 +24,11 @@ public actor HotlineNetworkClient: HotlineClient {
     private let broadcaster: EventBroadcaster
     let stringEncoding: String.Encoding
     let connectionSettings: ConnectionSettings
+    /// Set when the consumer attaches a developer-console / packet
+    /// inspector. Fires once per outbound encode and once per inbound
+    /// decode — see `PacketObserver`. Stays `nil` for normal connects
+    /// so there's no overhead in the hot path.
+    private let packetObserver: PacketObserver?
 
     private var nextTaskNumber: UInt32 = 1
     private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
@@ -72,7 +77,8 @@ public actor HotlineNetworkClient: HotlineClient {
     public static func connect(
         settings: ConnectionSettings,
         stringEncoding: String.Encoding = .macOSRoman,
-        trustEvaluator: CertificateTrustEvaluator? = nil
+        trustEvaluator: CertificateTrustEvaluator? = nil,
+        packetObserver: PacketObserver? = nil
     ) async throws -> HotlineNetworkClient {
         let host = NWEndpoint.Host(settings.address)
         guard let port = NWEndpoint.Port(rawValue: settings.port) else {
@@ -151,7 +157,8 @@ public actor HotlineNetworkClient: HotlineClient {
             connection: connection,
             queue: queue,
             settings: effectiveSettings,
-            stringEncoding: stringEncoding
+            stringEncoding: stringEncoding,
+            packetObserver: packetObserver
         )
         await client.startReader()
         return client
@@ -161,12 +168,14 @@ public actor HotlineNetworkClient: HotlineClient {
         connection: NWConnection,
         queue: DispatchQueue,
         settings: ConnectionSettings,
-        stringEncoding: String.Encoding
+        stringEncoding: String.Encoding,
+        packetObserver: PacketObserver? = nil
     ) {
         self.connection = connection
         self.queue = queue
         self.connectionSettings = settings
         self.stringEncoding = stringEncoding
+        self.packetObserver = packetObserver
         self.broadcaster = EventBroadcaster()
     }
 
@@ -227,6 +236,13 @@ public actor HotlineNetworkClient: HotlineClient {
 
     private func dispatch(header: PacketHeader, body: Data) {
         let fields = PacketCodec.decodeBody(body)
+        // Surface every inbound packet to the developer console (when
+        // an observer is attached) BEFORE reply-correlation /
+        // event-broadcast so the console sees every transaction —
+        // including replies, errors, and server pushes for unknown
+        // transaction IDs that wouldn't be surfaced via
+        // `HotlineEvent`.
+        packetObserver?.handle(.inbound, header, fields)
 
         // Reply correlation: if we have a pending continuation for this
         // task number, hand it the fields (or surface the server error).
@@ -396,6 +412,21 @@ public actor HotlineNetworkClient: HotlineClient {
             taskNumber: taskNumber,
             fields: fields
         )
+        if let packetObserver {
+            // Observer fires before the bytes leave the wire. Header
+            // bookkeeping (errorID / lengths) isn't computed for the
+            // outbound case because the consumer only needs direction
+            // + transactionID + taskNumber + fields.
+            let header = PacketHeader(
+                classID: 0,
+                transactionID: transactionID,
+                taskNumber: taskNumber,
+                errorID: 0,
+                dataLength: UInt32(packet.count),
+                totalLength: UInt32(packet.count)
+            )
+            packetObserver.handle(.outbound, header, fields)
+        }
 
         if expectsReply {
             return try await withCheckedThrowingContinuation { cont in
