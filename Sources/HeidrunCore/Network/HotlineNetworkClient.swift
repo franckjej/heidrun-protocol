@@ -244,6 +244,17 @@ public actor HotlineNetworkClient: HotlineClient {
         // `HotlineEvent`.
         packetObserver?.handle(.inbound, header, fields)
 
+        // Server-pushed ping (classID=0 request carrying TX 500) needs
+        // an explicit reply or the server reaps us after its keepalive
+        // window. Vanilla Hotline replies with classID=1, txID=0, no
+        // body. Done here BEFORE reply-correlation because pings have
+        // a fresh server-allocated taskNumber that won't match any of
+        // our pendingReplies.
+        if header.classID == 0, header.transactionID == 500 {
+            sendInbandPingReply(taskNumber: header.taskNumber)
+            return
+        }
+
         // Reply correlation: if we have a pending continuation for this
         // task number, hand it the fields (or surface the server error).
         if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
@@ -400,6 +411,35 @@ public actor HotlineNetworkClient: HotlineClient {
     /// Send a request and either return its reply fields (when the
     /// transaction expects a reply) or resolve immediately after the
     /// bytes leave the wire (when it doesn't).
+    /// Acknowledge a server-pushed ping (TX 500, class 0). Fire-and-
+    /// forget — no need to await the bytes leaving the wire from the
+    /// read-loop's perspective; if the send fails the next read will
+    /// surface the error. Also surfaces the reply we just emitted to
+    /// any attached `PacketObserver` so the developer console sees
+    /// the conversation balanced.
+    private func sendInbandPingReply(taskNumber: UInt32) {
+        let replyPacket = PacketCodec.encode(
+            classID: 1,
+            transactionID: 0,
+            taskNumber: taskNumber,
+            fields: []
+        )
+        Task { [weak self] in
+            try? await self?.connection.sendAsync(replyPacket)
+        }
+        if let packetObserver {
+            let replyHeader = PacketHeader(
+                classID: 1,
+                transactionID: 0,
+                taskNumber: taskNumber,
+                errorID: 0,
+                dataLength: UInt32(replyPacket.count),
+                totalLength: UInt32(replyPacket.count)
+            )
+            packetObserver.handle(.outbound, replyHeader, [])
+        }
+    }
+
     private func send(
         transactionID: UInt16,
         fields: [PacketField],

@@ -116,6 +116,31 @@ struct NIOHotlineClientIntegrationTests {
         await client.disconnect()
     }
 
+    @Test("server-pushed TX 500 ping is answered with a class-1 reply on the same task number")
+    func inboundPingIsAnswered() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            // Server-class ping with a non-zero task number so we can
+            // assert the client echoes it back on its reply.
+            try await conn.sendPush(transactionID: 500, taskNumber: 4242)
+            let reply = try await conn.readPacket()
+            #expect(reply.header.classID == 1, "ping reply should be class 1 (reply)")
+            #expect(reply.header.taskNumber == 4242, "ping reply must echo the server's task number")
+            #expect(reply.fields.isEmpty, "ping reply carries no body fields")
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        try await serverSide
+        await client.disconnect()
+    }
+
     @Test("PacketObserver.isKnown flags InfoTransaction + known requests, rejects others")
     func packetObserverIsKnown() {
         #expect(PacketObserver.isKnown(106))   // relayChat — InfoTransaction
