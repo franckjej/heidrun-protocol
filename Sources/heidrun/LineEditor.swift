@@ -60,6 +60,14 @@ final class LineEditor {
         }
         var raw = original
         cfmakeraw(&raw)
+        // cfmakeraw turns OPOST off, which kills the kernel's automatic
+        // NL → CR-NL translation. That's catastrophic for our REPL: the
+        // event-printer task writes "message\n" while we're in raw mode,
+        // and without OPOST the cursor moves down a row but stays in the
+        // same column — every chat line steps further right than the last.
+        // Re-enable OPOST + ONLCR so `\n` printed from anywhere in the
+        // process still does what callers expect.
+        raw.c_oflag |= tcflag_t(OPOST | ONLCR)
         guard tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) == 0 else {
             return Swift.readLine(strippingNewline: true)
         }
@@ -108,40 +116,77 @@ final class LineEditor {
                     redraw(prompt: prompt, buffer: buffer, cursor: cursor)
                 }
 
-            case 0x1b:                        // ESC — start of CSI/arrow sequence
-                guard readOneByte() == 0x5b else { continue }       // '['
-                guard let key = readOneByte() else { continue }
-                switch key {
-                case 0x41:                    // ↑ — older history
-                    if historyIndex == 0 { savedDraft = buffer }
-                    if historyIndex < history.count {
-                        historyIndex += 1
-                        buffer = Array(history[history.count - historyIndex].utf8)
-                        cursor = buffer.count
-                        redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+            case 0x1b:                        // ESC — start of CSI / Meta sequence
+                // Two flavours we care about:
+                //   ESC [ <code>          — bare arrow keys + CSI 1; <mod> X
+                //                            forms for Alt-/Ctrl-arrow.
+                //   ESC <letter>          — readline-style Meta keys, where
+                //                            Alt acts as a meta prefix
+                //                            (iTerm "Option as Meta", xterm
+                //                            metaSendsEscape). M-b / M-f
+                //                            jump word-back / word-forward.
+                guard let after = readOneByte() else { continue }
+                if after == 0x5b {                                 // '['
+                    guard let key = readOneByte() else { continue }
+                    switch key {
+                    case 0x41:                                     // ↑ — older history
+                        if historyIndex == 0 { savedDraft = buffer }
+                        if historyIndex < history.count {
+                            historyIndex += 1
+                            buffer = Array(history[history.count - historyIndex].utf8)
+                            cursor = buffer.count
+                            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+                        }
+                    case 0x42:                                     // ↓ — newer history (or back to draft)
+                        if historyIndex > 0 {
+                            historyIndex -= 1
+                            buffer = historyIndex == 0
+                                ? savedDraft
+                                : Array(history[history.count - historyIndex].utf8)
+                            cursor = buffer.count
+                            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+                        }
+                    case 0x43:                                     // → — cursor right (one char)
+                        if cursor < buffer.count {
+                            cursor += 1
+                            write(Array("\u{1b}[C".utf8))
+                        }
+                    case 0x44:                                     // ← — cursor left (one char)
+                        if cursor > 0 {
+                            cursor -= 1
+                            write(Array("\u{1b}[D".utf8))
+                        }
+                    case 0x31:
+                        // CSI 1 ; <modifier> <letter> — modified arrows.
+                        // Alt-arrow ⇒ modifier 3, Ctrl-arrow ⇒ modifier 5.
+                        // We treat both as "by-word" jumps (xterm + most
+                        // modern terminals; matches readline's M-b/M-f and
+                        // bash's word-by-word behaviour).
+                        guard readOneByte() == 0x3b else { continue }      // ';'
+                        guard readOneByte() != nil else { continue }       // modifier digit — accept any
+                        guard let modifiedKey = readOneByte() else { continue }
+                        switch modifiedKey {
+                        case 0x43:                                 // Alt/Ctrl+→
+                            jumpWordForward(buffer: buffer, cursor: &cursor)
+                            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+                        case 0x44:                                 // Alt/Ctrl+←
+                            jumpWordBack(buffer: buffer, cursor: &cursor)
+                            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+                        default:
+                            break
+                        }
+                    default:
+                        break
                     }
-                case 0x42:                    // ↓ — newer history (or back to draft)
-                    if historyIndex > 0 {
-                        historyIndex -= 1
-                        buffer = historyIndex == 0
-                            ? savedDraft
-                            : Array(history[history.count - historyIndex].utf8)
-                        cursor = buffer.count
-                        redraw(prompt: prompt, buffer: buffer, cursor: cursor)
-                    }
-                case 0x43:                    // → — cursor right
-                    if cursor < buffer.count {
-                        cursor += 1
-                        write(Array("\u{1b}[C".utf8))
-                    }
-                case 0x44:                    // ← — cursor left
-                    if cursor > 0 {
-                        cursor -= 1
-                        write(Array("\u{1b}[D".utf8))
-                    }
-                default:
-                    break
+                } else if after == 0x62 {                          // M-b — word back (readline)
+                    jumpWordBack(buffer: buffer, cursor: &cursor)
+                    redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+                } else if after == 0x66 {                          // M-f — word forward (readline)
+                    jumpWordForward(buffer: buffer, cursor: &cursor)
+                    redraw(prompt: prompt, buffer: buffer, cursor: cursor)
                 }
+                // Any other ESC-sequence is dropped silently — better
+                // than echoing raw bytes into chat.
 
             default:
                 if byte >= 0x20 || byte == 0x09 {     // printable ASCII + tab
@@ -152,6 +197,44 @@ final class LineEditor {
                 // Anything else (control chars we haven't bound) is dropped
                 // silently — beats sending raw escapes into chat.
             }
+        }
+    }
+
+    // MARK: - Word navigation
+
+    /// Move the cursor left to the start of the previous word.
+    /// Word = a run of non-whitespace bytes. Skip trailing whitespace
+    /// first so a cursor that sits right after a word jumps over the
+    /// space and lands at the word's start — matches readline's M-b.
+    private func jumpWordBack(buffer: [UInt8], cursor: inout Int) {
+        while cursor > 0, Self.isWordSeparator(buffer[cursor - 1]) {
+            cursor -= 1
+        }
+        while cursor > 0, !Self.isWordSeparator(buffer[cursor - 1]) {
+            cursor -= 1
+        }
+    }
+
+    /// Move the cursor right to the end of the next word. Skip leading
+    /// whitespace, then walk through the word — matches readline's M-f.
+    private func jumpWordForward(buffer: [UInt8], cursor: inout Int) {
+        while cursor < buffer.count, Self.isWordSeparator(buffer[cursor]) {
+            cursor += 1
+        }
+        while cursor < buffer.count, !Self.isWordSeparator(buffer[cursor]) {
+            cursor += 1
+        }
+    }
+
+    private static func isWordSeparator(_ byte: UInt8) -> Bool {
+        // Space, tab, and common punctuation. Anything else is part of
+        // a word. Matches most readline configurations closely enough
+        // for chat — a word is the run between separators.
+        switch byte {
+        case 0x20, 0x09:           // space, tab
+            return true
+        default:
+            return false
         }
     }
 
@@ -190,11 +273,15 @@ final class LineEditor {
         let row = Data((line + "\n").utf8)
         if FileManager.default.fileExists(atPath: url.path),
            let handle = try? FileHandle(forWritingTo: url) {
-            try? handle.seekToEnd()
-            try? handle.write(contentsOf: row)
-            try? handle.close()
+            // Best-effort persistence — history is convenience, not
+            // correctness. The discards silence the "result of 'try?'
+            // is unused" warning (0 warnings per commit, per project
+            // convention).
+            _ = try? handle.seekToEnd()
+            _ = try? handle.write(contentsOf: row)
+            _ = try? handle.close()
         } else {
-            try? row.write(to: url, options: .atomic)
+            _ = try? row.write(to: url, options: .atomic)
         }
     }
 }
