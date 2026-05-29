@@ -150,10 +150,11 @@ final class ServerConnection: @unchecked Sendable {
 
     func sendPush(
         transactionID: UInt16,
+        taskNumber: UInt32 = 0,
         fields: [PacketField] = []
     ) async throws {
         let packet = PacketCodec.encode(
-            classID: 0, transactionID: transactionID, taskNumber: 0, errorID: 0, fields: fields
+            classID: 0, transactionID: transactionID, taskNumber: taskNumber, errorID: 0, fields: fields
         )
         try await connection.sendAsync(packet)
     }

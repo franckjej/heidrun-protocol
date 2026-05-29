@@ -120,6 +120,14 @@ public actor NIOHotlineClient {
         // traffic.
         packetObserver?.handle(.inbound, header, fields)
 
+        // Server-pushed ping (classID=0 request, TX 500) needs an
+        // explicit reply or the server reaps us after its keepalive
+        // window. Same protocol behaviour as the Darwin transport.
+        if header.classID == 0, header.transactionID == 500 {
+            sendInbandPingReply(taskNumber: header.taskNumber)
+            return
+        }
+
         if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
             if header.errorID != 0 {
                 continuation.resume(throwing: HotlineError.serverError(
@@ -166,6 +174,31 @@ public actor NIOHotlineClient {
     // MARK: Transaction helpers (ported)
 
     private func nextTaskID() -> UInt32 { defer { nextTaskNumber &+= 1 }; return nextTaskNumber }
+
+    /// Acknowledge a server-pushed ping. Mirrors HotlineNetworkClient
+    /// — fire-and-forget reply with classID=1, txID=0, no body.
+    private func sendInbandPingReply(taskNumber: UInt32) {
+        let replyPacket = PacketCodec.encode(
+            classID: 1,
+            transactionID: 0,
+            taskNumber: taskNumber,
+            fields: []
+        )
+        Task { [weak self] in
+            try? await self?.send(replyPacket)
+        }
+        if let packetObserver {
+            let replyHeader = PacketHeader(
+                classID: 1,
+                transactionID: 0,
+                taskNumber: taskNumber,
+                errorID: 0,
+                dataLength: UInt32(replyPacket.count),
+                totalLength: UInt32(replyPacket.count)
+            )
+            packetObserver.handle(.outbound, replyHeader, [])
+        }
+    }
 
     @discardableResult
     private func send(transactionID: UInt16, fields: [PacketField], expectsReply: Bool) async throws -> [PacketField] {
