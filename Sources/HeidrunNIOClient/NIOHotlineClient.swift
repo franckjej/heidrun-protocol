@@ -395,6 +395,86 @@ public actor NIOHotlineClient {
         )
     }
 
+    // MARK: File transfers (HTXF side channel)
+
+    /// Download a file. Sends TX 202, pulls `transferID` +
+    /// `transferSize` from the reply, opens an HTXF side channel on
+    /// `settings.port + 1`, and streams the data fork to
+    /// `destination`. Hotline downloads are data-fork only on this
+    /// path — the side channel doesn't carry the FILP envelope, just
+    /// the bytes. Overwrites `destination` if it exists.
+    public func downloadFile(
+        at path: RemotePath,
+        name: String,
+        to destination: URL,
+        progress: (@Sendable (UInt64, UInt64) async -> Void)? = nil
+    ) async throws {
+        let reply = try await send(
+            transactionID: 202,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        guard let transferID = reply.uint32(.transferID) else {
+            throw HotlineError.malformedReply(reason: "missing transferID on TX 202 reply")
+        }
+        let totalSize = reply.uint32(.transferSize) ?? 0
+        try await NIOTransferConnection.download(
+            host: settings.address,
+            transferPort: settings.port + 1,
+            transferID: transferID,
+            totalSize: totalSize,
+            to: destination,
+            progress: progress
+        )
+    }
+
+    /// Upload a local file. Sends TX 203 with the announced size,
+    /// pulls `transferID` from the reply, opens an HTXF side channel,
+    /// and streams the FILP envelope + data fork from disk so a
+    /// multi-GB upload doesn't sit in memory.
+    public func uploadFile(
+        at path: RemotePath,
+        name: String,
+        from source: URL,
+        type: HeidrunCore.FourCharCode,
+        creator: HeidrunCore.FourCharCode,
+        progress: (@Sendable (UInt64, UInt64) async -> Void)? = nil
+    ) async throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        let fileSize = UInt32(clamping: (attributes[.size] as? Int) ?? 0)
+        let modificationDate = (attributes[.modificationDate] as? Date) ?? Date()
+        let creationDate = (attributes[.creationDate] as? Date) ?? modificationDate
+        let reply = try await send(
+            transactionID: 203,
+            fields: [
+                .path(.filePath, path, encoding: stringEncoding),
+                .uint32(.transferSize, fileSize),
+                .string(.fileName, name, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        guard let transferID = reply.uint32(.transferID) else {
+            throw HotlineError.malformedReply(reason: "missing transferID on TX 203 reply")
+        }
+        try await NIOTransferConnection.upload(
+            host: settings.address,
+            transferPort: settings.port + 1,
+            transferID: transferID,
+            source: source,
+            fileSize: fileSize,
+            fileName: name,
+            type: type,
+            creator: creator,
+            creationDate: creationDate,
+            modificationDate: modificationDate,
+            encoding: stringEncoding,
+            progress: progress
+        )
+    }
+
     // MARK: Threaded news (Hotline 1.5+ servers)
 
     /// List the news bundles (folders + categories) at the given

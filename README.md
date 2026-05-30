@@ -43,18 +43,26 @@ interactive Hotline session. The REPL works like classic HX:
 - bare text → public chat
 - `/who`, `/info <socket>`, `/msg <socket> <text>`, `/me <action>`,
   `/nick <name>` — client-side commands
-- `/ls [path]`, `/finfo <path/file>` — file system
+- `/ls [path]`, `/finfo <path/file>` — file system browse
+- `/get <path/file>`, `/put <local> [<remote-dir>]` — HTXF file
+  transfers (separate-channel TCP, streamed in 64 KiB chunks so
+  multi-GB transfers don't sit in memory; progress prints `↑/↓ N%`)
 - `/news` and `/post <text>` — plain (bulletin-board) news
 - `/tnews [path]`, `/tthreads <path>`, `/tread <path> <id>` — threaded
   news read
+- `/tpost <path> | <title> | <body>`,
+  `/treply <path> <id> | <body>` — threaded news post + reply
+  (reply auto-derives `Re: <parent title>`, one `Re:` deep)
 - `/quit`, `/help` — housekeeping
 - `/topic <subject>` (and any unrecognised `/cmd`) — forwarded to the
   server as chat, so server-side commands work without the client
   knowing them. `//foo` sends the literal text `/foo` as chat.
 
-Arrow keys browse command history; history persists at
-`~/.heidrun_history`. Threaded-news posting and HTXF file transfers
-are not in the CLI yet — use the GUI client for those.
+Arrow keys browse command history (persists at `~/.heidrun_history`);
+TAB completes builtin command names (single match splices, multiple
+match dumps the list, no-match no-op); the connection auto-reconnects
+on disconnect with capped exponential backoff (1/2/4/8/16/30/30/30s,
+8 attempts).
 
 ## Protocol extensions
 

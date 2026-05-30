@@ -354,6 +354,53 @@ struct Heidrun: AsyncParsableCommand {
                 body: pieces[2]
             )
             FileHandle.standardError.write(Data("→ posted \"\(pieces[1])\" to /\(path.components.joined(separator: "/"))\n".utf8))
+        case "get", "download":
+            // Download a file. `/get <remote-path>` — last path
+            // component is the file name; the file is saved to the
+            // current working directory with the same name.
+            let components = parseRemotePath(argument).components
+            guard let name = components.last, !name.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /get <remote/path/file>\n".utf8))
+                return true
+            }
+            let parentPath = RemotePath(components: Array(components.dropLast()))
+            let destination = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent(name)
+            FileHandle.standardError.write(Data("→ downloading \(name) → \(destination.path)\n".utf8))
+            try await client.downloadFile(
+                at: parentPath, name: name, to: destination,
+                progress: transferProgress(verb: "↓")
+            )
+            FileHandle.standardError.write(Data("→ done.\n".utf8))
+        case "put", "upload":
+            // Upload a local file. `/put <local-path> [<remote-dir>]`
+            // — the local file's basename becomes the remote name,
+            // remote-dir defaults to the server root.
+            let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard let first = parts.first.map(String.init) else {
+                FileHandle.standardError.write(Data("usage: /put <local-path> [<remote-dir>]\n".utf8))
+                return true
+            }
+            let localPath = (first as NSString).expandingTildeInPath
+            let source = URL(fileURLWithPath: localPath)
+            guard FileManager.default.isReadableFile(atPath: source.path) else {
+                FileHandle.standardError.write(Data("✗ local file not readable: \(source.path)\n".utf8))
+                return true
+            }
+            let remoteDir = parts.count > 1
+                ? parseRemotePath(String(parts[1]))
+                : RemotePath()
+            let name = source.lastPathComponent
+            let (type, creator) = Self.hfsCodes(for: name)
+            FileHandle.standardError.write(Data(
+                "→ uploading \(source.path) → /\((remoteDir.components + [name]).joined(separator: "/"))\n".utf8
+            ))
+            try await client.uploadFile(
+                at: remoteDir, name: name, from: source,
+                type: type, creator: creator,
+                progress: transferProgress(verb: "↑")
+            )
+            FileHandle.standardError.write(Data("→ done.\n".utf8))
         case "treply":
             // Reply to an existing thread.
             // Syntax: `/treply <category-path> <threadID> | <body>`
@@ -412,6 +459,9 @@ struct Heidrun: AsyncParsableCommand {
 
           /ls [path]             list files (root by default)
           /finfo <path/file>     file metadata (size, type/creator, dates, comment)
+          /get <path/file>       download a file to the current directory
+          /put <local-path> [<remote-dir>]
+                                 upload a local file (remote-dir defaults to root)
           /news                  read the plain news feed
           /post <text>           append to the plain news feed
           /tnews [path]          threaded news: list bundles at <path>
@@ -440,13 +490,74 @@ struct Heidrun: AsyncParsableCommand {
         FileHandle.standardError.write(Data(text.utf8))
     }
 
+    /// Progress callback for HTXF transfers. Prints a single
+    /// percentage line to stderr per call. The CLI doesn't try to
+    /// be fancy with a redrawn progress bar — the printer task may
+    /// interleave chat lines at any moment, and the REPL prompt is
+    /// in raw mode, so plain "↑ 23%" lines are the least surprising
+    /// shape. Throttled by the chunkSize (64KiB → ~16 calls per MB).
+    private func transferProgress(verb: String) -> @Sendable (UInt64, UInt64) async -> Void {
+        return { sent, total in
+            guard total > 0 else { return }
+            let percent = Int((Double(sent) / Double(total)) * 100)
+            FileHandle.standardError.write(Data("  \(verb) \(percent)%  (\(sent)/\(total) bytes)\n".utf8))
+        }
+    }
+
+    /// Pick a (type, creator) HFS 4CC pair for an outbound upload's
+    /// filename. Tiny curated table — modern macOS doesn't carry
+    /// these any more, so the server's `file_metadata` row gets
+    /// "BINA / ????" for anything we don't recognise. Mirrors the
+    /// most-common-cases subset of the GUI client's
+    /// `HFSCodes.swift`. Add rows here when something real surfaces.
+    private static func hfsCodes(for fileName: String) -> (HeidrunCore.FourCharCode, HeidrunCore.FourCharCode) {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        switch ext {
+        case "txt", "text", "md", "log", "swift", "c", "h", "m", "rtf",
+             "html", "htm", "csv", "json", "xml":
+            return ("TEXT", "ttxt")
+        case "pdf":
+            return ("PDF ", "CARO")
+        case "jpg", "jpeg":
+            return ("JPEG", "8BIM")
+        case "png":
+            return ("PNGf", "8BIM")
+        case "gif":
+            return ("GIFf", "8BIM")
+        case "tif", "tiff":
+            return ("TIFF", "8BIM")
+        case "mp3":
+            return ("MPG3", "TVOD")
+        case "m4a":
+            return ("M4A ", "TVOD")
+        case "mp4":
+            return ("mp4 ", "TVOD")
+        case "mov":
+            return ("MooV", "TVOD")
+        case "zip":
+            return ("ZIP ", "SITx")
+        case "sit", "sitx":
+            return ("SITx", "SITx")
+        case "dmg":
+            return ("udif", "ddsk")
+        case "iso":
+            return ("ISO ", "ddsk")
+        case "app":
+            return ("APPL", "????")
+        default:
+            return ("BINA", "????")
+        }
+    }
+
     /// Client-builtin command names, sorted for stable TAB-completion
     /// listings. Keep this in sync with the `switch` in `handle(input:)`
     /// and the `printHelp` block — the price of a thin CLI is three
     /// places that need to agree on the verb list.
     private static let builtinCommands: [String] = [
+        "download",
         "exit",
         "finfo",
+        "get",
         "help",
         "info",
         "ls",
@@ -455,6 +566,7 @@ struct Heidrun: AsyncParsableCommand {
         "news",
         "nick",
         "post",
+        "put",
         "pm",
         "q",
         "quit",
@@ -463,6 +575,7 @@ struct Heidrun: AsyncParsableCommand {
         "tread",
         "treply",
         "tthreads",
+        "upload",
         "who"
     ]
 
