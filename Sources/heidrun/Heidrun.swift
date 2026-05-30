@@ -48,18 +48,40 @@ struct Heidrun: AsyncParsableCommand {
         )
 
         let editor = LineEditor(historyURL: Self.historyURL())
-        // TAB completes client-builtin command names. Server-side
-        // commands (like heidrun-server's `/topic`) and chat lines
-        // don't complete — the CLI doesn't know server vocabulary,
-        // and chat-line completion would clobber typing.
-        editor.completion = { prefix in
-            Self.builtinCommands.filter { $0.hasPrefix(prefix) }
+        // Live-client holder shared with the completion callback so
+        // it can query the server for `/ls` path completion. Updated
+        // on every reconnect below.
+        let clientHolder = ClientHolder()
+
+        // TAB completes:
+        //   - the command name (first word after `/`) — static list
+        //   - `/ls <prefix>` arguments — remote folder listing
+        //   - everything else: no-op (would-be unrecognised commands
+        //     are forwarded to the server as chat, so completing them
+        //     would be misleading; arg completion for other path
+        //     commands is a follow-up).
+        editor.completion = { [clientHolder] context in
+            if context.isFirstWord {
+                return Self.builtinCommands.filter { $0.hasPrefix(context.currentWord) }
+            }
+            let parts = context.fullLine.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let command = parts.first.map({ String($0).lowercased() }) else { return [] }
+            switch command {
+            case "ls":
+                guard let client = await clientHolder.get() else { return [] }
+                return await Self.completeRemotePath(
+                    word: context.currentWord, client: client
+                )
+            default:
+                return []
+            }
         }
 
         // First connect uses no backoff — fail loudly if the host /
         // port / creds are wrong rather than silently retrying.
         FileHandle.standardError.write(Data("→ connecting to \(host):\(port)…\n".utf8))
         var session = try await establishSession(settings: settings)
+        await clientHolder.set(session.client)
         FileHandle.standardError.write(Data("→ chat ready. Type a message, or /help for commands.\n".utf8))
 
         defer {
@@ -70,7 +92,7 @@ struct Heidrun: AsyncParsableCommand {
             Task { await dyingClient.disconnect() }
         }
 
-        REPL: while let line = editor.readLine(prompt: "> ") {
+        REPL: while let line = await editor.readLine(prompt: "> ") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
@@ -84,6 +106,7 @@ struct Heidrun: AsyncParsableCommand {
                 await session.client.disconnect()
                 do {
                     session = try await reconnectWithBackoff(settings: settings)
+                    await clientHolder.set(session.client)
                     FileHandle.standardError.write(Data("→ reconnected.\n".utf8))
                 } catch {
                     FileHandle.standardError.write(Data("✗ reconnect failed: \(error)\n".utf8))
@@ -121,6 +144,62 @@ struct Heidrun: AsyncParsableCommand {
         private var alive = true
         func markDown() { alive = false }
         func isAlive() -> Bool { alive }
+    }
+
+    /// Actor-wrapped mutable reference to the live `NIOHotlineClient`.
+    /// The TAB-completion closure captures this so it can query the
+    /// CURRENT client (not whatever client existed at the moment the
+    /// editor was configured) — important because auto-reconnect
+    /// swaps the client out under us.
+    private actor ClientHolder {
+        private var client: NIOHotlineClient?
+        func set(_ newClient: NIOHotlineClient?) { client = newClient }
+        func get() -> NIOHotlineClient? { client }
+    }
+
+    /// Complete a remote-path word for `/ls`. The word can carry
+    /// path separators (e.g. `Software/Ma`) — we split on the last
+    /// `/`, query the parent directory, and return every entry
+    /// whose name starts with the basename. Folders return with a
+    /// trailing `/` so LineEditor's "trailing slash → no auto-space"
+    /// rule lets the user immediately TAB again to descend deeper.
+    /// Files return without the slash, with an auto-space.
+    ///
+    /// The returned strings are FULL replacement words (e.g.
+    /// `Software/Mac/` for a `Software/Ma` input). LineEditor's
+    /// splice logic prefix-matches and inserts the suffix.
+    private static func completeRemotePath(
+        word: String,
+        client: NIOHotlineClient
+    ) async -> [String] {
+        let lastSlash = word.lastIndex(of: "/")
+        let parentSegment: String
+        let basenamePrefix: String
+        if let lastSlash {
+            parentSegment = String(word[..<lastSlash])
+            basenamePrefix = String(word[word.index(after: lastSlash)...])
+        } else {
+            parentSegment = ""
+            basenamePrefix = word
+        }
+        let parentComponents = parentSegment
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        let parent = RemotePath(components: parentComponents)
+        guard let entries = try? await client.listFiles(at: parent) else { return [] }
+        let matches = entries
+            .filter { $0.name.hasPrefix(basenamePrefix) }
+            .map { entry -> String in
+                // Re-attach the parent segment so the returned word
+                // is a drop-in replacement for what the user typed.
+                let qualified = parentSegment.isEmpty
+                    ? entry.name
+                    : "\(parentSegment)/\(entry.name)"
+                // Trailing `/` on folders so the user can chain
+                // another TAB to step into them.
+                return entry.isFolder ? "\(qualified)/" : qualified
+            }
+        return matches
     }
 
     /// Connect + login + start the event-printer task. Failures

@@ -31,15 +31,27 @@ final class LineEditor {
     /// Whatever the user had typed before they started pressing ↑.
     private var savedDraft: [UInt8] = []
 
-    /// TAB-completion callback. Given the prefix the user has typed
-    /// so far (without the leading `/`), return the candidate
-    /// completions. Empty array = nothing to complete. The editor
-    /// only invokes this when the buffer starts with `/` and the
-    /// cursor is within the first whitespace-delimited word — TAB
-    /// in mid-chat (no leading `/`) is left to the default-case
-    /// drop (no literal `\t` echoed into chat). Nil disables
-    /// completion entirely.
-    var completion: ((_ prefix: String) -> [String])?
+    /// TAB-completion callback. The editor invokes this when the
+    /// buffer starts with `/` (so chat lines don't trigger it) and
+    /// passes the full context — which word the user is editing
+    /// and whether that word is the command itself (first word
+    /// after `/`) or an argument. The callback returns the full
+    /// replacements for `currentWord` (just the word, not the full
+    /// line), and is `async` because argument completion typically
+    /// queries the live server. Nil disables completion entirely.
+    var completion: ((_ context: CompletionContext) async -> [String])?
+
+    /// Context handed to the `completion` callback so it can pick
+    /// the right completion strategy. `fullLine` is everything from
+    /// the start of the buffer up to the cursor (without the
+    /// leading `/`); `currentWord` is the word being completed
+    /// (everything from the last space to the cursor); `isFirstWord`
+    /// flags command-name vs argument completion.
+    struct CompletionContext: Sendable {
+        public let fullLine: String
+        public let currentWord: String
+        public let isFirstWord: Bool
+    }
 
     private static let supportsRawMode: Bool = {
         guard let term = ProcessInfo.processInfo.environment["TERM"] else { return false }
@@ -58,8 +70,9 @@ final class LineEditor {
     /// Read one line of input with editing. Returns `nil` on EOF
     /// (Ctrl-D on an empty line) or when stdin isn't a TTY (e.g. when
     /// piped) — in the latter case we fall back to Foundation's
-    /// `readLine()` so scripted usage keeps working.
-    func readLine(prompt: String) -> String? {
+    /// `readLine()` so scripted usage keeps working. `async` because
+    /// the TAB-completion callback may itself await server queries.
+    func readLine(prompt: String) async -> String? {
         if !LineEditor.supportsRawMode || isatty(STDIN_FILENO) == 0 {
             FileHandle.standardError.write(Data(prompt.utf8))
             return Swift.readLine(strippingNewline: true)
@@ -199,7 +212,7 @@ final class LineEditor {
                 // than echoing raw bytes into chat.
 
             case 0x09:                        // TAB — completion
-                handleTabCompletion(
+                await handleTabCompletion(
                     buffer: &buffer,
                     cursor: &cursor,
                     prompt: prompt
@@ -219,28 +232,50 @@ final class LineEditor {
 
     // MARK: - TAB completion
 
-    /// TAB handler: complete the first whitespace-delimited word of a
-    /// `/cmd` line via the `completion` callback. No-op for chat
-    /// lines (so TAB just drops in mid-chat rather than echoing a
-    /// literal `\t`) and for the case where the cursor is past the
-    /// first word (arguments aren't completed — yet).
-    private func handleTabCompletion(buffer: inout [UInt8], cursor: inout Int, prompt: String) {
+    /// TAB handler: complete the word at the cursor via the
+    /// `completion` callback. No-op for chat lines (so TAB just
+    /// drops in mid-chat rather than echoing a literal `\t`).
+    /// Splices on a single match, extends to the longest common
+    /// prefix on multiple, dumps the candidate list when there's
+    /// no common extension — bash-style.
+    private func handleTabCompletion(buffer: inout [UInt8], cursor: inout Int, prompt: String) async {
         guard let completion else { return }
         let beforeCursor = String(decoding: buffer[..<cursor], as: UTF8.self)
+        // `//foo` escape-prefix means "send literally as chat" — no
+        // completion. Plain chat lines (no leading `/`) likewise.
         guard beforeCursor.hasPrefix("/"), !beforeCursor.hasPrefix("//") else { return }
-        let afterSlash = beforeCursor.dropFirst()
-        // Only complete inside the first word — once a space appears
-        // before the cursor we're in argument-land which v1 doesn't
-        // know how to complete.
-        guard !afterSlash.contains(" ") else { return }
-        let prefix = String(afterSlash)
-        let matches = completion(prefix).sorted()
+        let afterSlash = String(beforeCursor.dropFirst())
+        // The currentWord is everything from the last space (or
+        // start) to the cursor. `isFirstWord` flags whether that
+        // word is the command name itself or an argument.
+        let lastSpace = afterSlash.lastIndex(of: " ")
+        let currentWord: String
+        let isFirstWord: Bool
+        if let lastSpace {
+            currentWord = String(afterSlash[afterSlash.index(after: lastSpace)...])
+            isFirstWord = false
+        } else {
+            currentWord = afterSlash
+            isFirstWord = true
+        }
+        let context = CompletionContext(
+            fullLine: afterSlash,
+            currentWord: currentWord,
+            isFirstWord: isFirstWord
+        )
+        let matches = await completion(context).sorted()
         if matches.isEmpty { return }
         if matches.count == 1 {
-            guard matches[0].hasPrefix(prefix) else { return }
+            guard matches[0].hasPrefix(currentWord) else { return }
             // Splice in the suffix + a trailing space so the user
-            // can immediately start typing arguments.
-            let suffix = String(matches[0].dropFirst(prefix.count)) + " "
+            // can immediately start typing the next argument. Path
+            // completions that should NOT auto-trail (e.g. an open
+            // folder the user wants to descend into) can return the
+            // completion with a trailing `/` and the caller spots
+            // the trailing-`/` and omits the space — handled below.
+            let trailingSlash = matches[0].hasSuffix("/")
+            let suffix = String(matches[0].dropFirst(currentWord.count))
+                + (trailingSlash ? "" : " ")
             let suffixBytes = Array(suffix.utf8)
             buffer.insert(contentsOf: suffixBytes, at: cursor)
             cursor += suffixBytes.count
@@ -251,15 +286,20 @@ final class LineEditor {
         // longest common prefix; if there's no extension, dump the
         // candidate list on a new line and re-draw the prompt.
         let commonPrefix = Self.longestCommonPrefix(of: matches)
-        if commonPrefix.count > prefix.count {
-            let suffix = String(commonPrefix.dropFirst(prefix.count))
+        if commonPrefix.count > currentWord.count {
+            let suffix = String(commonPrefix.dropFirst(currentWord.count))
             let suffixBytes = Array(suffix.utf8)
             buffer.insert(contentsOf: suffixBytes, at: cursor)
             cursor += suffixBytes.count
             redraw(prompt: prompt, buffer: buffer, cursor: cursor)
         } else {
             write(Array("\r\n".utf8))
-            let listing = matches.map { "/\($0)" }.joined(separator: "  ")
+            // Display matches with a leading `/` only for command
+            // names (so the listing reads like the prompt would);
+            // path arguments are listed bare.
+            let listing = isFirstWord
+                ? matches.map { "/\($0)" }.joined(separator: "  ")
+                : matches.joined(separator: "  ")
             write(Array(listing.utf8))
             write(Array("\r\n".utf8))
             redraw(prompt: prompt, buffer: buffer, cursor: cursor)
