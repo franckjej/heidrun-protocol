@@ -55,26 +55,21 @@ struct Heidrun: AsyncParsableCommand {
 
         // TAB completes:
         //   - the command name (first word after `/`) — static list
-        //   - `/ls <prefix>` arguments — remote folder listing
-        //   - everything else: no-op (would-be unrecognised commands
-        //     are forwarded to the server as chat, so completing them
-        //     would be misleading; arg completion for other path
-        //     commands is a follow-up).
+        //   - file-system arguments via per-command dispatch:
+        //       /ls /finfo /get /download — remote files+folders
+        //       /put /upload (arg 1)      — LOCAL files+folders
+        //       /put /upload (arg 2)      — remote files+folders
+        //       /tnews                    — news bundles
+        //       /tthreads /tread /tpost /treply (first arg only,
+        //         and only before any `|` — past that is freeform
+        //         title/body text)        — news bundles
+        //   - everything else: no-op (chat / server-forwarded
+        //     commands would lead to misleading completions).
         editor.completion = { [clientHolder] context in
             if context.isFirstWord {
                 return Self.builtinCommands.filter { $0.hasPrefix(context.currentWord) }
             }
-            let parts = context.fullLine.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
-            guard let command = parts.first.map({ String($0).lowercased() }) else { return [] }
-            switch command {
-            case "ls":
-                guard let client = await clientHolder.get() else { return [] }
-                return await Self.completeRemotePath(
-                    word: context.currentWord, client: client
-                )
-            default:
-                return []
-            }
+            return await Self.completeArgument(context: context, clientHolder: clientHolder)
         }
 
         // First connect uses no backoff — fail loudly if the host /
@@ -157,49 +152,159 @@ struct Heidrun: AsyncParsableCommand {
         func get() -> NIOHotlineClient? { client }
     }
 
-    /// Complete a remote-path word for `/ls`. The word can carry
-    /// path separators (e.g. `Software/Ma`) — we split on the last
-    /// `/`, query the parent directory, and return every entry
-    /// whose name starts with the basename. Folders return with a
-    /// trailing `/` so LineEditor's "trailing slash → no auto-space"
-    /// rule lets the user immediately TAB again to descend deeper.
-    /// Files return without the slash, with an auto-space.
-    ///
-    /// The returned strings are FULL replacement words (e.g.
-    /// `Software/Mac/` for a `Software/Ma` input). LineEditor's
-    /// splice logic prefix-matches and inserts the suffix.
+    /// Top-level dispatcher for `/cmd <arg…>` TAB completion.
+    /// Knows the per-command argument shape — which arg index is a
+    /// path, whether it's a local or remote path, whether to stop at
+    /// the first `|` (for the pipe-separated post commands), etc.
+    /// Returns full-replacement words; LineEditor splices the suffix.
+    private static func completeArgument(
+        context: LineEditor.CompletionContext,
+        clientHolder: ClientHolder
+    ) async -> [String] {
+        let words = context.fullLine
+            .split(separator: " ", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let cmd = words.first?.lowercased() else { return [] }
+        // Arg index of currentWord: words[0] is the command, the
+        // remainder are arguments. `argIndex == 0` ⇒ first arg.
+        let argIndex = max(0, words.count - 2)
+        // Pipe-separated post commands stop completing once a `|`
+        // appears anywhere in the line — past that is freeform
+        // title/body text.
+        if context.fullLine.contains("|") {
+            return []
+        }
+        switch cmd {
+        case "ls", "finfo", "get", "download":
+            guard argIndex == 0,
+                  let client = await clientHolder.get() else { return [] }
+            return await completeRemotePath(
+                word: context.currentWord, client: client
+            )
+        case "put", "upload":
+            if argIndex == 0 {
+                // Local filesystem — let the user pick from their
+                // own disk regardless of connection state.
+                return completeLocalPath(word: context.currentWord)
+            }
+            if argIndex == 1, let client = await clientHolder.get() {
+                return await completeRemotePath(
+                    word: context.currentWord, client: client
+                )
+            }
+            return []
+        case "tnews", "tthreads", "tread", "tpost", "treply":
+            // News commands all take a bundle/category path as
+            // their first argument. Anything past the first arg
+            // (threadID for /tread/treply; pipe-separated body for
+            // /tpost/treply — handled above) doesn't complete.
+            guard argIndex == 0,
+                  let client = await clientHolder.get() else { return [] }
+            return await completeNewsPath(
+                word: context.currentWord, client: client
+            )
+        default:
+            return []
+        }
+    }
+
+    /// Complete a remote-path word against `client.listFiles(at:)`.
+    /// The word can carry path separators (e.g. `Software/Ma`) — we
+    /// split on the last `/`, query the parent directory, and return
+    /// every entry whose name starts with the basename. Folders
+    /// return with a trailing `/` (LineEditor's "trailing slash →
+    /// no auto-space" rule lets the user chain TAB to descend);
+    /// files return without the slash and pick up the auto-space.
     private static func completeRemotePath(
         word: String,
         client: NIOHotlineClient
     ) async -> [String] {
-        let lastSlash = word.lastIndex(of: "/")
-        let parentSegment: String
-        let basenamePrefix: String
-        if let lastSlash {
-            parentSegment = String(word[..<lastSlash])
-            basenamePrefix = String(word[word.index(after: lastSlash)...])
-        } else {
-            parentSegment = ""
-            basenamePrefix = word
-        }
+        let (parentSegment, basenamePrefix) = splitPath(word)
         let parentComponents = parentSegment
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
         let parent = RemotePath(components: parentComponents)
         guard let entries = try? await client.listFiles(at: parent) else { return [] }
-        let matches = entries
+        return entries
             .filter { $0.name.hasPrefix(basenamePrefix) }
-            .map { entry -> String in
-                // Re-attach the parent segment so the returned word
-                // is a drop-in replacement for what the user typed.
+            .map { entry in
                 let qualified = parentSegment.isEmpty
                     ? entry.name
                     : "\(parentSegment)/\(entry.name)"
-                // Trailing `/` on folders so the user can chain
-                // another TAB to step into them.
                 return entry.isFolder ? "\(qualified)/" : qualified
             }
-        return matches
+    }
+
+    /// Complete a news-bundle path against `client.fetchNewsBundles(at:)`.
+    /// Same path-splicing semantics as `completeRemotePath`: folder
+    /// bundles get a trailing `/` for chained descent, leaf
+    /// categories return without it so the auto-space kicks in.
+    private static func completeNewsPath(
+        word: String,
+        client: NIOHotlineClient
+    ) async -> [String] {
+        let (parentSegment, basenamePrefix) = splitPath(word)
+        let parentComponents = parentSegment
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        let parent = RemotePath(components: parentComponents)
+        guard let bundles = try? await client.fetchNewsBundles(at: parent) else { return [] }
+        return bundles
+            .filter { $0.title.hasPrefix(basenamePrefix) }
+            .map { bundle in
+                let qualified = parentSegment.isEmpty
+                    ? bundle.title
+                    : "\(parentSegment)/\(bundle.title)"
+                // `.bundle` (folder) descends; `.category` is a leaf
+                // (holds posts, no further descent useful).
+                return bundle.kind == .bundle ? "\(qualified)/" : qualified
+            }
+    }
+
+    /// Complete a local-filesystem path for `/put`'s first argument.
+    /// Preserves the user's preferred prefix style — if they typed
+    /// `~/Doc`, the returned word starts with `~/Doc…` not
+    /// `/Users/…/Doc…`, so chained TABs keep the leading tilde.
+    /// Folders get a trailing `/`; files don't.
+    private static func completeLocalPath(word: String) -> [String] {
+        let (parentSegment, basenamePrefix) = splitPath(word)
+        // Empty parent ⇒ current directory; otherwise expand any
+        // leading `~` to an absolute path for FileManager.
+        let lookupDir: String
+        if parentSegment.isEmpty {
+            lookupDir = FileManager.default.currentDirectoryPath
+        } else {
+            lookupDir = (parentSegment as NSString).expandingTildeInPath
+        }
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: lookupDir) else {
+            return []
+        }
+        return entries
+            .filter { $0.hasPrefix(basenamePrefix) }
+            .map { entry in
+                let qualified = parentSegment.isEmpty
+                    ? entry
+                    : "\(parentSegment)/\(entry)"
+                let absolute = (lookupDir as NSString).appendingPathComponent(entry)
+                var isDir: ObjCBool = false
+                let exists = fileManager.fileExists(atPath: absolute, isDirectory: &isDir)
+                return (exists && isDir.boolValue) ? "\(qualified)/" : qualified
+            }
+    }
+
+    /// Split a `parent/parent/basename` (or bare `basename`) into
+    /// `(parentSegment, basenamePrefix)`. Empty parent for bare
+    /// words. Shared by all three completers so the parent-path
+    /// preservation behaves the same everywhere.
+    private static func splitPath(_ word: String) -> (parent: String, basename: String) {
+        guard let lastSlash = word.lastIndex(of: "/") else {
+            return (parent: "", basename: word)
+        }
+        return (
+            parent: String(word[..<lastSlash]),
+            basename: String(word[word.index(after: lastSlash)...])
+        )
     }
 
     /// Connect + login + start the event-printer task. Failures
