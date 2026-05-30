@@ -16,6 +16,14 @@ public enum HotlineError: Error, Sendable, Hashable {
     /// The server replied with a non-zero error id.
     case serverError(id: UInt32, message: String?)
 
+    /// **Heidrun extension.** An upload was rejected because a file
+    /// with that name already exists at the destination. Surfaced
+    /// when the server included a `.errorKind` field of
+    /// `HotlineErrorKind.fileAlreadyExists`. The optional `message`
+    /// carries the server's human-readable phrasing (often containing
+    /// the file name) so the client can show it in an alert.
+    case fileAlreadyExists(message: String?)
+
     /// The server replied but the payload didn't conform to the expected
     /// shape (missing required object IDs, length mismatch, etc.).
     case malformedReply(reason: String)
@@ -39,6 +47,21 @@ public enum HotlineError: Error, Sendable, Hashable {
     /// self-signed cert, or a pinned certificate changed and re-trust was
     /// cancelled.
     case certificateNotTrusted
+
+    /// Translate a wire-level error reply into a `HotlineError`. When
+    /// the server attached a recognised `HotlineErrorKind` value via
+    /// the `.errorKind` object field, the corresponding typed case is
+    /// returned; otherwise this falls back to `.serverError(id:message:)`
+    /// so existing call sites keep working unchanged.
+    public static func fromWire(errorID: UInt32, kind: UInt16?, message: String?) -> HotlineError {
+        if let raw = kind, let kind = HotlineErrorKind(rawValue: raw) {
+            switch kind {
+            case .fileAlreadyExists:
+                return .fileAlreadyExists(message: message)
+            }
+        }
+        return .serverError(id: errorID, message: message)
+    }
 }
 
 extension HotlineError: CustomStringConvertible {
@@ -53,6 +76,11 @@ extension HotlineError: CustomStringConvertible {
                 return "server error \(id): \(message)"
             }
             return "server error \(id)"
+        case let .fileAlreadyExists(message):
+            if let message {
+                return "file already exists: \(message)"
+            }
+            return "file already exists"
         case .malformedReply(let reason):
             return "malformed reply: \(reason)"
         case .cancelled:
@@ -86,6 +114,11 @@ extension HotlineError: CustomStringConvertible {
             }
             // Capitalise the first character so it reads as a sentence
             // even when the server sent a lowercase phrase.
+            return message.prefix(1).uppercased() + message.dropFirst()
+        case let .fileAlreadyExists(message):
+            guard let message, !message.isEmpty else {
+                return "A file with that name already exists on the server."
+            }
             return message.prefix(1).uppercased() + message.dropFirst()
         case .malformedReply(let reason):
             return "The server's reply didn't make sense (\(reason))."

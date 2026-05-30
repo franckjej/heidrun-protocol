@@ -54,6 +54,15 @@ public enum HotlineObjectKey: UInt16, Sendable, Hashable, CaseIterable {
     /// connection's `stringEncoding`.
     case userEmoji          = 0xE000
 
+    /// **Heidrun extension** (not standard Hotline). UInt16 kind code
+    /// attached to an error reply (header.errorID != 0) so the client
+    /// can switch on the failure mode programmatically rather than
+    /// parsing the human-readable `.errorMessage`. Values are defined
+    /// in `HotlineErrorKind`. Absent on errors that don't have a
+    /// specific kind — clients fall back to the generic server-error
+    /// case in that situation.
+    case errorKind          = 0xE001
+
     // Threaded news
     case newsThreadList     = 321
     case newsCategoryName   = 322

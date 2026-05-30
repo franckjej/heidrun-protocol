@@ -130,8 +130,13 @@ public actor NIOHotlineClient {
 
         if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
             if header.errorID != 0 {
-                continuation.resume(throwing: HotlineError.serverError(
-                    id: header.errorID, message: fields.string(.errorMessage, encoding: stringEncoding)))
+                let message = fields.string(.errorMessage, encoding: stringEncoding)
+                let typed = HotlineError.fromWire(
+                    errorID: header.errorID,
+                    kind: fields.uint16(.errorKind),
+                    message: message
+                )
+                continuation.resume(throwing: typed)
             } else {
                 continuation.resume(returning: fields)
             }
