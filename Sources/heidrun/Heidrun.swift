@@ -46,45 +46,7 @@ struct Heidrun: AsyncParsableCommand {
             icon: icon,
             useTLS: false
         )
-        FileHandle.standardError.write(Data("→ connecting to \(host):\(port)…\n".utf8))
-        let client = try await NIOHotlineClient.connect(settings: settings)
-        do {
-            let emojiArg: String? = nil
-            try await client.login(name: login, password: password, nickname: nickname, icon: icon, emoji: emojiArg)
-        } catch {
-            await client.disconnect()
-            throw error
-        }
-        let info = await client.connectionInfo
-        FileHandle.standardError.write(Data("→ connected (server v\(info.serverVersion), socket \(info.connectionSocket))\n".utf8))
 
-        // Spin up the inbound-event printer in a child task; it prints
-        // chat / PMs / join-leave to stdout while the main task reads
-        // user commands on stdin. The two streams will interleave on a
-        // shared TTY — acceptable for MVP, fixable later with readline.
-        //
-        // Same task also handles `agreementReceived`: many servers gate
-        // chat behind an agreement push (TX 109). We mirror what every
-        // GUI client does — print the agreement once, then auto-call
-        // `agreeToAgreement` so the user can actually type. If the
-        // operator wanted a hard manual gate they'd require an account.
-        let eventStream = client.events
-        let nick = nickname
-        let iconID = icon
-        let printerTask = Task {
-            for await event in eventStream {
-                if case .agreementReceived(_, let autoAgree) = event, autoAgree {
-                    try? await client.agreeToAgreement(nickname: nick, icon: iconID, emoji: nil)
-                }
-                printEvent(event)
-            }
-        }
-
-        // Read stdin line-by-line through the in-tree LineEditor —
-        // raw-mode termios so arrow keys browse history rather than
-        // sending escape sequences into chat. Falls back to plain
-        // readLine() when stdin isn't a TTY (piped / redirected) so
-        // scripted usage still works.
         let editor = LineEditor(historyURL: Self.historyURL())
         // TAB completes client-builtin command names. Server-side
         // commands (like heidrun-server's `/topic`) and chat lines
@@ -93,21 +55,140 @@ struct Heidrun: AsyncParsableCommand {
         editor.completion = { prefix in
             Self.builtinCommands.filter { $0.hasPrefix(prefix) }
         }
+
+        // First connect uses no backoff — fail loudly if the host /
+        // port / creds are wrong rather than silently retrying.
+        FileHandle.standardError.write(Data("→ connecting to \(host):\(port)…\n".utf8))
+        var session = try await establishSession(settings: settings)
         FileHandle.standardError.write(Data("→ chat ready. Type a message, or /help for commands.\n".utf8))
-        while let line = editor.readLine(prompt: "> ") {
+
+        defer {
+            session.printerTask.cancel()
+            // `disconnect()` is async; the deferred Task wrapper is the
+            // canonical "fire-and-forget cleanup in a sync defer" shape.
+            let dyingClient = session.client
+            Task { await dyingClient.disconnect() }
+        }
+
+        REPL: while let line = editor.readLine(prompt: "> ") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
+
+            // The printer task's `for await` returns when the events
+            // stream ends — i.e. the TCP connection dropped. The
+            // alive flag flips false then; reconnect before we'd
+            // otherwise hand the dead client to `handle(input:)`.
+            if !(await session.alive.isAlive()) {
+                FileHandle.standardError.write(Data("→ connection lost, reconnecting…\n".utf8))
+                session.printerTask.cancel()
+                await session.client.disconnect()
+                do {
+                    session = try await reconnectWithBackoff(settings: settings)
+                    FileHandle.standardError.write(Data("→ reconnected.\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data("✗ reconnect failed: \(error)\n".utf8))
+                    break REPL
+                }
+            }
+
             do {
-                let keepGoing = try await handle(input: trimmed, client: client)
+                let keepGoing = try await handle(input: trimmed, client: session.client)
                 if !keepGoing { break }
             } catch {
                 FileHandle.standardError.write(Data("✗ \(error)\n".utf8))
             }
         }
 
-        printerTask.cancel()
-        await client.disconnect()
         FileHandle.standardError.write(Data("→ disconnected\n".utf8))
+    }
+
+    /// Holds the per-attempt state a REPL session depends on: the
+    /// live `NIOHotlineClient`, the printer-task pumping its events
+    /// stream to stdout, and a shared "is the connection still up"
+    /// flag the printer task flips when the events stream ends.
+    /// Sendable so the REPL can reassign it on reconnect.
+    private struct Session: Sendable {
+        let client: NIOHotlineClient
+        let printerTask: Task<Void, Never>
+        let alive: SessionAlive
+    }
+
+    /// Tiny actor wrapping a "connection still alive" boolean. The
+    /// printer task sets it to false when the events stream ends
+    /// (TCP drop, server kick, etc.); the REPL reads it before each
+    /// `handle(input:)` to decide whether to reconnect first.
+    private actor SessionAlive {
+        private var alive = true
+        func markDown() { alive = false }
+        func isAlive() -> Bool { alive }
+    }
+
+    /// Connect + login + start the event-printer task. Failures
+    /// (bad host / port / creds, server-side rejection) throw — the
+    /// initial-connect path lets them bubble up to the user; the
+    /// reconnect path catches + retries with backoff.
+    private func establishSession(settings: ConnectionSettings) async throws -> Session {
+        let client = try await NIOHotlineClient.connect(settings: settings)
+        do {
+            try await client.login(
+                name: login, password: password,
+                nickname: nickname, icon: icon, emoji: nil
+            )
+        } catch {
+            await client.disconnect()
+            throw error
+        }
+        let info = await client.connectionInfo
+        FileHandle.standardError.write(Data(
+            "→ connected (server v\(info.serverVersion), socket \(info.connectionSocket))\n".utf8
+        ))
+
+        let alive = SessionAlive()
+        let eventStream = client.events
+        let capturedNick = nickname
+        let capturedIcon = icon
+        let printerTask = Task {
+            // Many servers gate chat behind an agreement push (TX 109).
+            // Auto-accept here matches every GUI client's behaviour.
+            for await event in eventStream {
+                if case .agreementReceived(_, let autoAgree) = event, autoAgree {
+                    try? await client.agreeToAgreement(
+                        nickname: capturedNick, icon: capturedIcon, emoji: nil
+                    )
+                }
+                printEvent(event)
+            }
+            // Stream ended → connection died. Flip the flag so the
+            // REPL's pre-command check kicks reconnect on the next
+            // line submission.
+            await alive.markDown()
+        }
+        return Session(client: client, printerTask: printerTask, alive: alive)
+    }
+
+    /// Retry `establishSession` with capped exponential backoff. The
+    /// delays (`1, 2, 4, 8, 16, 30, 30, …`) match what an
+    /// auto-reconnecting IRC client would do — short enough that a
+    /// flaky network recovers fast, capped so we don't hammer a
+    /// down server. Caps at 8 attempts (~90s) before giving up.
+    private func reconnectWithBackoff(settings: ConnectionSettings) async throws -> Session {
+        let delays: [UInt64] = [1, 2, 4, 8, 16, 30, 30, 30]
+        var lastError: Error?
+        for (attempt, seconds) in delays.enumerated() {
+            FileHandle.standardError.write(Data(
+                "→ reconnect attempt \(attempt + 1)/\(delays.count) in \(seconds)s…\n".utf8
+            ))
+            try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            do {
+                return try await establishSession(settings: settings)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "✗ attempt \(attempt + 1) failed: \(error)\n".utf8
+                ))
+                lastError = error
+            }
+        }
+        throw lastError ?? HotlineError.cancelled
     }
 
     /// Per-user shell-history file. Lives next to the user's classic
