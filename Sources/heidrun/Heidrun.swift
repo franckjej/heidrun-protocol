@@ -52,6 +52,10 @@ struct Heidrun: AsyncParsableCommand {
         // it can query the server for `/ls` path completion. Updated
         // on every reconnect below.
         let clientHolder = ClientHolder()
+        // CWD lives in its own actor so the completion closure and
+        // `handle(input:)` (which lives outside the REPL loop's
+        // scope) can both see + mutate the same value.
+        let cwdHolder = CurrentDirectoryHolder()
 
         // TAB completes:
         //   - the command name (first word after `/`) — static list
@@ -65,11 +69,13 @@ struct Heidrun: AsyncParsableCommand {
         //         title/body text)        — news bundles
         //   - everything else: no-op (chat / server-forwarded
         //     commands would lead to misleading completions).
-        editor.completion = { [clientHolder] context in
+        editor.completion = { [clientHolder, cwdHolder] context in
             if context.isFirstWord {
                 return Self.builtinCommands.filter { $0.hasPrefix(context.currentWord) }
             }
-            return await Self.completeArgument(context: context, clientHolder: clientHolder)
+            return await Self.completeArgument(
+                context: context, clientHolder: clientHolder, cwdHolder: cwdHolder
+            )
         }
 
         // First connect uses no backoff — fail loudly if the host /
@@ -87,7 +93,14 @@ struct Heidrun: AsyncParsableCommand {
             Task { await dyingClient.disconnect() }
         }
 
-        REPL: while let line = await editor.readLine(prompt: "> ") {
+        REPL: while true {
+            // Prompt advertises the current Hotline directory so the
+            // user always knows what `/ls`, `/get`, etc. will operate
+            // on (mirrors how a shell prompt advertises $PWD). Root
+            // stays the bare "> " for compactness.
+            let cwd = await cwdHolder.get()
+            let prompt = cwd.isRoot ? "> " : "/\(cwd.components.joined(separator: "/")) > "
+            guard let line = await editor.readLine(prompt: prompt) else { break }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
@@ -110,8 +123,23 @@ struct Heidrun: AsyncParsableCommand {
             }
 
             do {
-                let keepGoing = try await handle(input: trimmed, client: session.client)
+                let keepGoing = try await handle(
+                    input: trimmed,
+                    client: session.client,
+                    cwdHolder: cwdHolder
+                )
                 if !keepGoing { break }
+            } catch let HotlineError.serverError(id, message) {
+                // Render the server's human-readable message when
+                // present — heidrun-server rc7+ attaches one for the
+                // "file not found" / "wrong field" failures. Falls
+                // back to the bare id for older servers (and for
+                // legitimate transient errors that don't include text).
+                if let message {
+                    FileHandle.standardError.write(Data("✗ \(message)\n".utf8))
+                } else {
+                    FileHandle.standardError.write(Data("✗ server error \(id)\n".utf8))
+                }
             } catch {
                 FileHandle.standardError.write(Data("✗ \(error)\n".utf8))
             }
@@ -152,34 +180,46 @@ struct Heidrun: AsyncParsableCommand {
         func get() -> NIOHotlineClient? { client }
     }
 
+    /// Actor-wrapped current directory for the session — set by
+    /// `/cd`, read by the prompt loop, the path-resolving helpers
+    /// (so `/ls foo` means "foo inside cwd"), and the TAB-completion
+    /// closure (so completion happens relative to cwd just like the
+    /// commands do). Defaults to root.
+    private actor CurrentDirectoryHolder {
+        private var path: RemotePath = RemotePath()
+        func set(_ newPath: RemotePath) { path = newPath }
+        func get() -> RemotePath { path }
+    }
+
     /// Top-level dispatcher for `/cmd <arg…>` TAB completion.
     /// Knows the per-command argument shape — which arg index is a
     /// path, whether it's a local or remote path, whether to stop at
     /// the first `|` (for the pipe-separated post commands), etc.
     /// Returns full-replacement words; LineEditor splices the suffix.
+    ///
+    /// File-area completers receive the session's Hotline cwd so
+    /// relative completions (`/ls Soft<TAB>`) resolve to the right
+    /// directory just like the command itself would.
     private static func completeArgument(
         context: LineEditor.CompletionContext,
-        clientHolder: ClientHolder
+        clientHolder: ClientHolder,
+        cwdHolder: CurrentDirectoryHolder
     ) async -> [String] {
         let words = context.fullLine
             .split(separator: " ", omittingEmptySubsequences: false)
             .map(String.init)
         guard let cmd = words.first?.lowercased() else { return [] }
-        // Arg index of currentWord: words[0] is the command, the
-        // remainder are arguments. `argIndex == 0` ⇒ first arg.
         let argIndex = max(0, words.count - 2)
-        // Pipe-separated post commands stop completing once a `|`
-        // appears anywhere in the line — past that is freeform
-        // title/body text.
         if context.fullLine.contains("|") {
             return []
         }
         switch cmd {
-        case "ls", "finfo", "get", "download":
+        case "ls", "finfo", "get", "download", "cd":
             guard argIndex == 0,
                   let client = await clientHolder.get() else { return [] }
+            let cwd = await cwdHolder.get()
             return await completeRemotePath(
-                word: context.currentWord, client: client
+                word: context.currentWord, client: client, cwd: cwd
             )
         case "put", "upload":
             if argIndex == 0 {
@@ -188,16 +228,15 @@ struct Heidrun: AsyncParsableCommand {
                 return completeLocalPath(word: context.currentWord)
             }
             if argIndex == 1, let client = await clientHolder.get() {
+                let cwd = await cwdHolder.get()
                 return await completeRemotePath(
-                    word: context.currentWord, client: client
+                    word: context.currentWord, client: client, cwd: cwd
                 )
             }
             return []
         case "tnews", "tthreads", "tread", "tpost", "treply":
-            // News commands all take a bundle/category path as
-            // their first argument. Anything past the first arg
-            // (threadID for /tread/treply; pipe-separated body for
-            // /tpost/treply — handled above) doesn't complete.
+            // News bundles aren't reached via the file-area cwd —
+            // they're a separate tree on the server. Always absolute.
             guard argIndex == 0,
                   let client = await clientHolder.get() else { return [] }
             return await completeNewsPath(
@@ -208,22 +247,26 @@ struct Heidrun: AsyncParsableCommand {
         }
     }
 
-    /// Complete a remote-path word against `client.listFiles(at:)`.
-    /// The word can carry path separators (e.g. `Software/Ma`) — we
-    /// split on the last `/`, query the parent directory, and return
-    /// every entry whose name starts with the basename. Folders
-    /// return with a trailing `/` (LineEditor's "trailing slash →
+    /// Complete a remote-path word against `client.listFiles(at:)`,
+    /// resolving the parent against `cwd` when the word doesn't
+    /// start with `/`. The returned word preserves the user's
+    /// original prefix form (relative vs absolute), so chaining
+    /// TABs keeps the leading style they typed.
+    ///
+    /// Folders get a trailing `/` (LineEditor's "trailing slash →
     /// no auto-space" rule lets the user chain TAB to descend);
     /// files return without the slash and pick up the auto-space.
     private static func completeRemotePath(
         word: String,
-        client: NIOHotlineClient
+        client: NIOHotlineClient,
+        cwd: RemotePath
     ) async -> [String] {
         let (parentSegment, basenamePrefix) = splitPath(word)
-        let parentComponents = parentSegment
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-        let parent = RemotePath(components: parentComponents)
+        // Resolve the parent: if the original word started with `/`,
+        // it's absolute (parent segment carries the leading `/`
+        // implicitly via empty first component). Otherwise we
+        // resolve relative to cwd.
+        let parent = resolveRemotePath(parentSegment, against: cwd)
         guard let entries = try? await client.listFiles(at: parent) else { return [] }
         return entries
             .filter { $0.name.hasPrefix(basenamePrefix) }
@@ -400,7 +443,11 @@ struct Heidrun: AsyncParsableCommand {
     ///                      server-side handlers like heidrun-server's
     ///                      `/topic` get the raw line.
     ///   bare text        → public chat at Chat ID 0.
-    private func handle(input: String, client: NIOHotlineClient) async throws -> Bool {
+    private func handle(
+        input: String,
+        client: NIOHotlineClient,
+        cwdHolder: CurrentDirectoryHolder
+    ) async throws -> Bool {
         // `//x` → "/x" as chat. Strip the leading `/`, send the rest.
         if input.hasPrefix("//") {
             try await client.sendChat(String(input.dropFirst()), in: nil, isAction: false)
@@ -413,6 +460,10 @@ struct Heidrun: AsyncParsableCommand {
         let parts = input.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
         let command = parts.first.map(String.init)?.lowercased() ?? ""
         let argument = parts.count > 1 ? String(parts[1]) : ""
+        // Snapshot the cwd so all path-resolution within this dispatch
+        // sees the same value (a `/cd` in the middle of the same
+        // command can't happen, but the snapshot keeps reads cheap).
+        let cwd = await cwdHolder.get()
         switch command {
         case "quit", "exit", "q":
             return false
@@ -447,12 +498,24 @@ struct Heidrun: AsyncParsableCommand {
             }
             try await client.changeNickname(trimmedNick, icon: icon, emoji: nil)
         case "ls":
-            // Root by default; otherwise split a forward-slash path into
-            // RemotePath components. Mirrors the syntax users already
-            // know from the GUI's address bar.
-            let path = parseRemotePath(argument)
+            // `/ls` with no arg lists cwd. `/ls foo` resolves
+            // relative to cwd; `/ls /foo` is absolute. Same
+            // semantics every shell user expects.
+            let path = Self.resolveRemotePath(argument, against: cwd)
             let entries = try await client.listFiles(at: path)
             printFiles(entries, atPath: path)
+        case "cd":
+            // `/cd` → root. `/cd /Software` → absolute.
+            // `/cd Software` → relative. `/cd ..` → up one.
+            let target = Self.resolveRemotePath(argument, against: cwd)
+            await cwdHolder.set(target)
+            FileHandle.standardError.write(Data(
+                "→ /\(target.components.joined(separator: "/"))\n".utf8
+            ))
+        case "pwd":
+            FileHandle.standardError.write(Data(
+                "/\(cwd.components.joined(separator: "/"))\n".utf8
+            ))
         case "news":
             let feed = try await client.fetchNewsFeed()
             if feed.isEmpty {
@@ -470,9 +533,10 @@ struct Heidrun: AsyncParsableCommand {
             try await client.postPlainNews(trimmedPost)
         case "finfo":
             // file-info shortcut: forward-slash path with the last
-            // component as the filename. `/finfo foo.txt` looks up at
-            // root; `/finfo Software/Mac/foo.txt` walks the path.
-            let components = parseRemotePath(argument).components
+            // component as the filename. `/finfo foo.txt` looks up
+            // in cwd; `/finfo Software/Mac/foo.txt` walks the path
+            // relative to cwd; leading `/` makes it absolute.
+            let components = Self.resolveRemotePath(argument, against: cwd).components
             guard let name = components.last, !name.isEmpty else {
                 FileHandle.standardError.write(Data("usage: /finfo <path/file>\n".utf8))
                 return true
@@ -541,8 +605,10 @@ struct Heidrun: AsyncParsableCommand {
         case "get", "download":
             // Download a file. `/get <remote-path>` — last path
             // component is the file name; the file is saved to the
-            // current working directory with the same name.
-            let components = parseRemotePath(argument).components
+            // CLI host's current working directory with the same
+            // name. The remote path is resolved relative to the
+            // Hotline cwd unless absolute (`/foo/bar`).
+            let components = Self.resolveRemotePath(argument, against: cwd).components
             guard let name = components.last, !name.isEmpty else {
                 FileHandle.standardError.write(Data("usage: /get <remote/path/file>\n".utf8))
                 return true
@@ -572,8 +638,8 @@ struct Heidrun: AsyncParsableCommand {
                 return true
             }
             let remoteDir = parts.count > 1
-                ? parseRemotePath(String(parts[1]))
-                : RemotePath()
+                ? Self.resolveRemotePath(String(parts[1]), against: cwd)
+                : cwd
             let name = source.lastPathComponent
             let (type, creator) = Self.hfsCodes(for: name)
             FileHandle.standardError.write(Data(
@@ -641,11 +707,15 @@ struct Heidrun: AsyncParsableCommand {
           /me <action>           emote in public chat
           /nick <name>           change your nickname
 
-          /ls [path]             list files (root by default)
+          /ls [path]             list files (cwd by default)
+          /cd [path]             change Hotline cwd (root by default;
+                                 supports .., absolute /path, and
+                                 relative path; the prompt shows cwd)
+          /pwd                   print the Hotline cwd
           /finfo <path/file>     file metadata (size, type/creator, dates, comment)
-          /get <path/file>       download a file to the current directory
+          /get <path/file>       download a file to the CLI host's cwd
           /put <local-path> [<remote-dir>]
-                                 upload a local file (remote-dir defaults to root)
+                                 upload a local file (remote-dir defaults to cwd)
           /news                  read the plain news feed
           /post <text>           append to the plain news feed
           /tnews [path]          threaded news: list bundles at <path>
@@ -738,6 +808,7 @@ struct Heidrun: AsyncParsableCommand {
     /// and the `printHelp` block — the price of a thin CLI is three
     /// places that need to agree on the verb list.
     private static let builtinCommands: [String] = [
+        "cd",
         "download",
         "exit",
         "finfo",
@@ -751,6 +822,7 @@ struct Heidrun: AsyncParsableCommand {
         "nick",
         "post",
         "put",
+        "pwd",
         "pm",
         "q",
         "quit",
@@ -782,12 +854,43 @@ struct Heidrun: AsyncParsableCommand {
     /// bar shows: forward-slash separated. Leading / and empty
     /// components are stripped so `/ls /Software/` works the same as
     /// `/ls Software`.
+    ///
+    /// Used by news commands (no cwd concept). File commands route
+    /// through `resolveRemotePath(_:against:)` which adds cwd-relative
+    /// resolution.
     private func parseRemotePath(_ raw: String) -> RemotePath {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return RemotePath() }
         let components = trimmed
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
+        return RemotePath(components: components)
+    }
+
+    /// Resolve a path argument against the session's Hotline cwd,
+    /// shell-style:
+    ///   - empty → cwd unchanged
+    ///   - leading `/` → absolute (cwd ignored)
+    ///   - otherwise → joined to cwd, with `..` and `.` honoured
+    /// Used by every file-area command + `/cd` itself so navigation
+    /// matches what every shell user expects.
+    static func resolveRemotePath(_ raw: String, against cwd: RemotePath) -> RemotePath {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return cwd }
+        let parts = trimmed
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        var components: [String] = trimmed.hasPrefix("/") ? [] : cwd.components
+        for piece in parts {
+            switch piece {
+            case "..":
+                if !components.isEmpty { components.removeLast() }
+            case ".":
+                break
+            default:
+                components.append(piece)
+            }
+        }
         return RemotePath(components: components)
     }
 
