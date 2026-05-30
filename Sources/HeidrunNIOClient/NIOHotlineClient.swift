@@ -279,6 +279,320 @@ public actor NIOHotlineClient {
         try await send(transactionID: 500, fields: [], expectsReply: false)
     }
 
+    public func fetchUserInfo(socket: UInt16) async throws -> UserInfo {
+        let reply = try await send(
+            transactionID: 303,
+            fields: [.uint16(.socket, socket)],
+            expectsReply: true
+        )
+        let user = User(
+            socket: socket,
+            icon: reply.uint16(.icon) ?? 0,
+            status: UserStatus(rawValue: reply.uint16(.status) ?? 0),
+            privileges: [],
+            nickname: reply.string(.nickname, encoding: stringEncoding) ?? "",
+            emoji: reply.string(.userEmoji, encoding: .utf8)
+        )
+        let accountLogin = Self.decodeLoginField(reply.first(.login), encoding: stringEncoding)
+        let infoText = reply.string(.message, encoding: stringEncoding) ?? ""
+        return UserInfo(user: user, accountLogin: accountLogin, infoText: infoText)
+    }
+
+    public func sendPrivateMessage(_ message: String, to socket: UInt16) async throws {
+        try await send(
+            transactionID: 108,
+            fields: [
+                .uint16(.socket, socket),
+                .string(.message, message, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+    }
+
+    /// Acknowledge a server-pushed agreement. Required to clear the
+    /// "must agree" gate some servers put between login and chat —
+    /// without this the connection stays in limbo. TX 121, no reply.
+    public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
+        var fields: [PacketField] = [
+            .string(.nickname, nickname, encoding: stringEncoding),
+            .uint16(.icon, icon)
+        ]
+        if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
+        try await send(transactionID: 121, fields: fields, expectsReply: false)
+    }
+
+    /// List directory entries at the given remote path. Root = empty
+    /// `RemotePath`. TX 200 reply contains zero or more
+    /// `.fileListEntry` blobs, each decoded by `FileListEntryCodec`.
+    public func listFiles(at path: RemotePath) async throws -> [RemoteFile] {
+        let reply = try await send(
+            transactionID: 200,
+            fields: [.path(.filePath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        return reply
+            .filter { $0.key == HotlineObjectKey.fileListEntry.rawValue }
+            .compactMap { FileListEntryCodec.decode($0.data, encoding: stringEncoding) }
+    }
+
+    /// Fetch metadata for one file at `(path, name)`. TX 206 reply
+    /// carries longFileType / longFileCreator / size / creation +
+    /// modification dates / optional comment. Dates use the Hotline
+    /// 1904-epoch encoding decoded by `PacketField.date(_:)`.
+    public func fetchFileInfo(at path: RemotePath, name: String) async throws -> RemoteFileInfo {
+        let reply = try await send(
+            transactionID: 206,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        let typeFCC: HeidrunCore.FourCharCode = reply.first(.longFileType)
+            .map { Self.fourCharCode(from: $0.data) } ?? .file
+        let creatorFCC: HeidrunCore.FourCharCode = reply.first(.longFileCreator)
+            .map { Self.fourCharCode(from: $0.data) } ?? .unknown
+        let size = reply.uint32(.fileSize) ?? 0
+        return RemoteFileInfo(
+            file: RemoteFile(
+                name: reply.string(.fileName, encoding: stringEncoding) ?? name,
+                type: typeFCC,
+                creator: creatorFCC,
+                size: size,
+                itemCount: 0
+            ),
+            creationDate: reply.date(.fileCreationDate),
+            modificationDate: reply.date(.fileModificationDate),
+            comment: reply.string(.fileComment, encoding: stringEncoding),
+            dataForkSize: size,
+            resourceForkSize: 0
+        )
+    }
+
+    /// Big-endian 4-byte → `FourCharCode`. Mirrors the private helper
+    /// on `HotlineNetworkClient`. Pads with NUL when the field is
+    /// short (some servers send fewer bytes for `.unknown` creators).
+    private static func fourCharCode(from data: Data) -> HeidrunCore.FourCharCode {
+        let bytes = Array(data.prefix(4)) + Array(repeating: UInt8(0), count: max(0, 4 - data.count))
+        return HeidrunCore.FourCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+
+    /// Fetch the plain (bulletin-board) news feed. TX 101 reply
+    /// carries the whole feed as a single `.message` field.
+    public func fetchNewsFeed() async throws -> String {
+        let reply = try await send(transactionID: 101, fields: [], expectsReply: true)
+        return reply.string(.message, encoding: stringEncoding) ?? ""
+    }
+
+    /// Append one entry to the plain news feed. TX 103 (postNewNews),
+    /// the server inserts it at the top and pushes `.newsPosted` to
+    /// every connected client (already wired into the broadcaster).
+    public func postPlainNews(_ text: String) async throws {
+        try await send(
+            transactionID: 103,
+            fields: [.string(.message, text, encoding: stringEncoding)],
+            expectsReply: true
+        )
+    }
+
+    // MARK: File transfers (HTXF side channel)
+
+    /// Download a file. Sends TX 202, pulls `transferID` +
+    /// `transferSize` from the reply, opens an HTXF side channel on
+    /// `settings.port + 1`, and streams the data fork to
+    /// `destination`. Hotline downloads are data-fork only on this
+    /// path — the side channel doesn't carry the FILP envelope, just
+    /// the bytes. Overwrites `destination` if it exists.
+    public func downloadFile(
+        at path: RemotePath,
+        name: String,
+        to destination: URL,
+        progress: (@Sendable (UInt64, UInt64) async -> Void)? = nil
+    ) async throws {
+        let reply = try await send(
+            transactionID: 202,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        guard let transferID = reply.uint32(.transferID) else {
+            throw HotlineError.malformedReply(reason: "missing transferID on TX 202 reply")
+        }
+        let totalSize = reply.uint32(.transferSize) ?? 0
+        try await NIOTransferConnection.download(
+            host: settings.address,
+            transferPort: settings.port + 1,
+            transferID: transferID,
+            totalSize: totalSize,
+            to: destination,
+            progress: progress
+        )
+    }
+
+    /// Upload a local file. Sends TX 203 with the announced size,
+    /// pulls `transferID` from the reply, opens an HTXF side channel,
+    /// and streams the FILP envelope + data fork from disk so a
+    /// multi-GB upload doesn't sit in memory.
+    public func uploadFile(
+        at path: RemotePath,
+        name: String,
+        from source: URL,
+        type: HeidrunCore.FourCharCode,
+        creator: HeidrunCore.FourCharCode,
+        progress: (@Sendable (UInt64, UInt64) async -> Void)? = nil
+    ) async throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        let fileSize = UInt32(clamping: (attributes[.size] as? Int) ?? 0)
+        let modificationDate = (attributes[.modificationDate] as? Date) ?? Date()
+        let creationDate = (attributes[.creationDate] as? Date) ?? modificationDate
+        let reply = try await send(
+            transactionID: 203,
+            fields: [
+                .path(.filePath, path, encoding: stringEncoding),
+                .uint32(.transferSize, fileSize),
+                .string(.fileName, name, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        guard let transferID = reply.uint32(.transferID) else {
+            throw HotlineError.malformedReply(reason: "missing transferID on TX 203 reply")
+        }
+        try await NIOTransferConnection.upload(
+            host: settings.address,
+            transferPort: settings.port + 1,
+            transferID: transferID,
+            source: source,
+            fileSize: fileSize,
+            fileName: name,
+            type: type,
+            creator: creator,
+            creationDate: creationDate,
+            modificationDate: modificationDate,
+            encoding: stringEncoding,
+            progress: progress
+        )
+    }
+
+    // MARK: Threaded news (Hotline 1.5+ servers)
+
+    /// List the news bundles (folders + categories) at the given
+    /// `newsPath`. Root = empty path. TX 370 reply carries 0+
+    /// `.newsBundleEntry` blobs decoded by `NewsBundleEntryCodec`.
+    public func fetchNewsBundles(at path: RemotePath) async throws -> [NewsBundle] {
+        let reply = try await send(
+            transactionID: 370,
+            fields: [.path(.newsPath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        return reply
+            .filter { $0.key == HotlineObjectKey.newsBundleEntry.rawValue }
+            .compactMap { NewsBundleEntryCodec.decode($0.data, encoding: stringEncoding) }
+    }
+
+    /// List the threads inside a category at the given `newsPath`. TX
+    /// 371 reply carries a single `.newsThreadList` blob decoded by
+    /// `NewsThreadListCodec` into a flat array of threads (the
+    /// parent-id field is what makes the tree structure).
+    public func fetchNewsThreads(at path: RemotePath) async throws -> [NewsThread] {
+        let reply = try await send(
+            transactionID: 371,
+            fields: [.path(.newsPath, path, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        guard let blob = reply.first(.newsThreadList) else { return [] }
+        return NewsThreadListCodec.decode(blob.data, encoding: stringEncoding)
+    }
+
+    /// Post a new threaded-news article (top-level when `parentThreadID
+    /// == 0`, otherwise a reply to that article). TX 410, six fields:
+    /// `newsPath(325)`, `articleID(326)` carrying the parent id per
+    /// Hotline 1.5 spec, `title(328)`, `articleFlags(334)` zero,
+    /// `type(327)`, `body(333)`. Server replies success/error but the
+    /// Darwin client uses `sendNoReply` here so we mirror that — the
+    /// reply is informational only and the caller treats post as
+    /// fire-and-forget; if it really failed (e.g. permission) the
+    /// next `fetchNewsThreads` won't see the post.
+    public func postNewsThread(
+        at path: RemotePath,
+        parentThreadID: UInt16,
+        title: String,
+        type: String,
+        body: String
+    ) async throws {
+        try await send(
+            transactionID: 410,
+            fields: [
+                .path(.newsPath, path, encoding: stringEncoding),
+                .uint16(.newsArticleID, parentThreadID),
+                .string(.newsTitle, title, encoding: stringEncoding),
+                .uint16(.newsArticleFlags, 0),
+                .string(.newsType, type, encoding: stringEncoding),
+                .string(.newsData, body, encoding: stringEncoding)
+            ],
+            expectsReply: false
+        )
+    }
+
+    /// Fetch a single thread's body. TX 400 takes the category path,
+    /// the article id, and the requested element MIME type. Reply
+    /// carries parent/post-date + a single thread element (title +
+    /// author + body). Mirrors the Darwin-side decoder so the body
+    /// pane on any UI gets the same shape.
+    public func fetchNewsThread(at path: RemotePath, threadID: UInt16, type: String) async throws -> NewsThread {
+        let reply = try await send(
+            transactionID: 400,
+            fields: [
+                .path(.newsPath, path, encoding: stringEncoding),
+                .uint16(.newsArticleID, threadID),
+                .string(.newsType, type, encoding: stringEncoding)
+            ],
+            expectsReply: true
+        )
+        let parentID = reply.uint16(.newsParentThread) ?? 0
+        let postDate = reply.date(.newsDate) ?? Date.distantPast
+        var elements: [ThreadElement] = []
+        let elementTitle = reply.string(.newsTitle, encoding: stringEncoding)
+        let elementBody = reply.string(.newsData, encoding: stringEncoding)
+        if elementTitle != nil || elementBody != nil {
+            let bodyBytes = reply.first(.newsData)?.data.count ?? 0
+            elements.append(ThreadElement(
+                title: elementTitle ?? "",
+                author: reply.string(.newsAuthor, encoding: stringEncoding) ?? "",
+                mimeType: reply.string(.newsType, encoding: stringEncoding) ?? ThreadElement.plainTextType,
+                size: UInt16(clamping: bodyBytes),
+                body: elementBody ?? ""
+            ))
+        }
+        return NewsThread(threadID: threadID, parentID: parentID, postDate: postDate, elements: elements)
+    }
+
+    /// Mirrors `HotlineNetworkClient.decodeLoginField` — the `login`
+    /// field on a 303 reply may or may not be XOR-obfuscated depending
+    /// on server flavour, so we sniff the high-bit distribution and
+    /// pick the right decoder. Duplicated rather than shared to keep
+    /// the cross-platform NIO module from depending on the Darwin
+    /// Network/ folder.
+    private static func decodeLoginField(
+        _ field: PacketField?,
+        encoding: String.Encoding
+    ) -> String {
+        guard let field, !field.data.isEmpty else { return "" }
+        let highBitCount = field.data.reduce(0) { count, byte in
+            byte >= 0x80 ? count + 1 : count
+        }
+        let looksObfuscated = highBitCount * 2 > field.data.count
+        if looksObfuscated {
+            var bytes = field.data
+            for index in bytes.indices {
+                bytes[index] = bytes[index] ^ 0xFF
+            }
+            return String(data: bytes, encoding: encoding) ?? ""
+        }
+        return String(data: field.data, encoding: encoding) ?? ""
+    }
+
     // MARK: Keepalive + teardown
 
     private func startKeepalive() {

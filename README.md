@@ -19,12 +19,50 @@ Linux.
     `HotlineNetworkClient` and `HotlineTrackerClient`. The Apple-
     only files are gated by `#if canImport(Network)` so HeidrunServer
     can build them on Linux without the symbols being live.
+- `Sources/HeidrunNIOClient/` — `NIOHotlineClient`, the
+  cross-platform (Linux + macOS) SwiftNIO transport. Reuses
+  HeidrunCore's codecs + `EventBroadcaster`; only the wire transport
+  is new.
+- `Sources/heidrun/` — `heidrun` executable, a text-only Hotline
+  CLI ("modern HX") built on `NIOHotlineClient`. See _Heidrun CLI_
+  below.
 - `Tests/HeidrunCoreTests/` — codec + loopback integration tests.
+- `Tests/HeidrunNIOClientTests/` — NIO transport + per-transaction
+  round-trip tests via the existing `LoopbackServer`.
 - `HeidrunTestServer/` — sibling Swift package, a small loopback
   `NWListener`-backed fake server used while cross-referencing wire
   formats during the original Obj-C → Swift port. Not exposed via
   the root Package.swift; `cd HeidrunTestServer && swift run` to use
   it.
+
+## Heidrun CLI
+
+`swift run heidrun <host[:port]> -l <login> -p <pw> -n <nick>` opens an
+interactive Hotline session. The REPL works like classic HX:
+
+- bare text → public chat
+- `/who`, `/info <socket>`, `/msg <socket> <text>`, `/me <action>`,
+  `/nick <name>` — client-side commands
+- `/ls [path]`, `/finfo <path/file>` — file system browse
+- `/get <path/file>`, `/put <local> [<remote-dir>]` — HTXF file
+  transfers (separate-channel TCP, streamed in 64 KiB chunks so
+  multi-GB transfers don't sit in memory; progress prints `↑/↓ N%`)
+- `/news` and `/post <text>` — plain (bulletin-board) news
+- `/tnews [path]`, `/tthreads <path>`, `/tread <path> <id>` — threaded
+  news read
+- `/tpost <path> | <title> | <body>`,
+  `/treply <path> <id> | <body>` — threaded news post + reply
+  (reply auto-derives `Re: <parent title>`, one `Re:` deep)
+- `/quit`, `/help` — housekeeping
+- `/topic <subject>` (and any unrecognised `/cmd`) — forwarded to the
+  server as chat, so server-side commands work without the client
+  knowing them. `//foo` sends the literal text `/foo` as chat.
+
+Arrow keys browse command history (persists at `~/.heidrun_history`);
+TAB completes builtin command names (single match splices, multiple
+match dumps the list, no-match no-op); the connection auto-reconnects
+on disconnect with capped exponential backoff (1/2/4/8/16/30/30/30s,
+8 attempts).
 
 ## Protocol extensions
 
