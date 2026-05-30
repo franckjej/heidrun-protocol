@@ -124,7 +124,42 @@ swift run HeidrunTestServer
 
 ## License
 
-(TBD — same as the parent project.)
+Released publicly under the **GNU General Public License v2.0**. Full
+text in `LICENSE` at the repository root, or at
+<https://www.gnu.org/licenses/gpl-2.0.html>.
+
+The GPL-2.0 release aligns this package with the public licensing of
+[`heidrun-swift`][heidrun-swift] — the macOS client is a port of the
+2002 Heidrun Hotline client by Göran Granström, whose original
+plug-in modules were GPL-2.0; this package shares that lineage out of
+respect for the same heritage. See `NOTICE.md` in the heidrun-swift
+repository for the full credit.
+
+### Dual licensing
+
+Copyright © Daubit & Francke GmbH. **The copyright holder reserves all
+rights to license this code under other terms** — commercial,
+proprietary, BSD/MIT-style, or any other arrangement — for its own
+products (notably the closed-source operator side of HeidrunServer)
+and for third parties on request. The GPL-2.0 grant above governs
+public/community use; it does not bind the copyright holder's own
+re-use of the same code under different terms.
+
+If you'd like a non-GPL license for this package, get in touch:
+`jens.francke@daubit-francke.de`.
+
+### Third-party dependencies
+
+This package links the following Apple Swift open-source packages,
+each distributed under the **Apache License 2.0**:
+
+- `swift-nio` — https://github.com/apple/swift-nio
+- `swift-argument-parser` — https://github.com/apple/swift-argument-parser
+
+Plus the transitive `swift-atomics`, `swift-collections`,
+`swift-system` (all Apache 2.0). Their license texts ship with the
+binary distribution of `heidrun-swift` (see that repo's
+`THIRD_PARTY_LICENSES.md`).
 
 [heidrun-swift]: https://github.com/franckjej/heidrun-swift
 [heidrun-server]: https://github.com/franckjej/heidrun-server
