@@ -425,6 +425,36 @@ public actor NIOHotlineClient {
         return NewsThreadListCodec.decode(blob.data, encoding: stringEncoding)
     }
 
+    /// Post a new threaded-news article (top-level when `parentThreadID
+    /// == 0`, otherwise a reply to that article). TX 410, six fields:
+    /// `newsPath(325)`, `articleID(326)` carrying the parent id per
+    /// Hotline 1.5 spec, `title(328)`, `articleFlags(334)` zero,
+    /// `type(327)`, `body(333)`. Server replies success/error but the
+    /// Darwin client uses `sendNoReply` here so we mirror that — the
+    /// reply is informational only and the caller treats post as
+    /// fire-and-forget; if it really failed (e.g. permission) the
+    /// next `fetchNewsThreads` won't see the post.
+    public func postNewsThread(
+        at path: RemotePath,
+        parentThreadID: UInt16,
+        title: String,
+        type: String,
+        body: String
+    ) async throws {
+        try await send(
+            transactionID: 410,
+            fields: [
+                .path(.newsPath, path, encoding: stringEncoding),
+                .uint16(.newsArticleID, parentThreadID),
+                .string(.newsTitle, title, encoding: stringEncoding),
+                .uint16(.newsArticleFlags, 0),
+                .string(.newsType, type, encoding: stringEncoding),
+                .string(.newsData, body, encoding: stringEncoding)
+            ],
+            expectsReply: false
+        )
+    }
+
     /// Fetch a single thread's body. TX 400 takes the category path,
     /// the article id, and the requested element MIME type. Reply
     /// carries parent/post-date + a single thread element (title +

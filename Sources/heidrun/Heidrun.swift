@@ -238,6 +238,71 @@ struct Heidrun: AsyncParsableCommand {
             }
             let thread = try await client.fetchNewsThread(at: path, threadID: threadID, type: ThreadElement.plainTextType)
             printNewsThread(thread)
+        case "tpost":
+            // New top-level thread in a category.
+            // Syntax: `/tpost <category-path> | <title> | <body>`
+            // (pipe-separated because forward-slash is the path
+            // delimiter and titles / bodies can contain spaces).
+            let pieces = argument.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard pieces.count == 3,
+                  !pieces[0].isEmpty,
+                  !pieces[1].isEmpty
+            else {
+                FileHandle.standardError.write(Data("usage: /tpost <category-path> | <title> | <body>\n".utf8))
+                return true
+            }
+            let path = parseRemotePath(pieces[0])
+            guard !path.isRoot else {
+                FileHandle.standardError.write(Data("usage: /tpost <category-path> | <title> | <body>\n".utf8))
+                return true
+            }
+            try await client.postNewsThread(
+                at: path,
+                parentThreadID: 0,
+                title: pieces[1],
+                type: ThreadElement.plainTextType,
+                body: pieces[2]
+            )
+            FileHandle.standardError.write(Data("→ posted \"\(pieces[1])\" to /\(path.components.joined(separator: "/"))\n".utf8))
+        case "treply":
+            // Reply to an existing thread.
+            // Syntax: `/treply <category-path> <threadID> | <body>`
+            // Title is auto-set to "Re: <parent title>" (parent
+            // fetched first), one Re: deep so chains don't accrete.
+            let pipeSplit = argument.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard pipeSplit.count == 2, !pipeSplit[1].isEmpty else {
+                FileHandle.standardError.write(Data("usage: /treply <category-path> <threadID> | <body>\n".utf8))
+                return true
+            }
+            let head = pipeSplit[0].split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard head.count == 2,
+                  let threadID = UInt16(head[1].trimmingCharacters(in: .whitespaces))
+            else {
+                FileHandle.standardError.write(Data("usage: /treply <category-path> <threadID> | <body>\n".utf8))
+                return true
+            }
+            let path = parseRemotePath(String(head[0]))
+            guard !path.isRoot else {
+                FileHandle.standardError.write(Data("usage: /treply <category-path> <threadID> | <body>\n".utf8))
+                return true
+            }
+            let parent = try await client.fetchNewsThread(
+                at: path, threadID: threadID, type: ThreadElement.plainTextType
+            )
+            let parentTitle = parent.elements.first?.title ?? ""
+            let title = replyTitle(forParent: parentTitle)
+            try await client.postNewsThread(
+                at: path,
+                parentThreadID: threadID,
+                title: title,
+                type: ThreadElement.plainTextType,
+                body: pipeSplit[1]
+            )
+            FileHandle.standardError.write(Data("→ replied to #\(threadID) in /\(path.components.joined(separator: "/"))\n".utf8))
         default:
             // Not a client builtin — forward to the server. heidrun-server
             // exposes commands like `/topic` as leading-slash chat its
@@ -264,6 +329,10 @@ struct Heidrun: AsyncParsableCommand {
           /tnews [path]          threaded news: list bundles at <path>
           /tthreads <path>       threaded news: list threads in a category
           /tread <path> <id>     threaded news: show one thread body
+          /tpost <path> | <title> | <body>
+                                 threaded news: post a new top-level thread
+          /treply <path> <id> | <body>
+                                 threaded news: reply (title auto = "Re: …")
 
           /help                  this help
           /quit                  disconnect and exit
@@ -281,6 +350,21 @@ struct Heidrun: AsyncParsableCommand {
 
         """
         FileHandle.standardError.write(Data(text.utf8))
+    }
+
+    /// "Re: " prefix used by `/treply` to derive the reply title from
+    /// the parent's title. Chains stay one `Re:` deep
+    /// (case-insensitive) so `Re: Re: Re: Welcome` collapses back to
+    /// `Re: Welcome` — same convention every news/mail client has
+    /// used since the 80s, and matches the GUI's `NewsThreadActions.replyTitle`.
+    private func replyTitle(forParent parentTitle: String) -> String {
+        let prefix = "Re: "
+        var trimmed = parentTitle.trimmingCharacters(in: .whitespaces)
+        while trimmed.lowercased().hasPrefix(prefix.lowercased()) {
+            trimmed = String(trimmed.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespaces)
+        }
+        return prefix + trimmed
     }
 
     /// Hotline path syntax in the CLI mirrors what the GUI's address
