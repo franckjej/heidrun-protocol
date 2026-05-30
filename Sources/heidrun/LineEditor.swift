@@ -32,25 +32,46 @@ final class LineEditor {
     private var savedDraft: [UInt8] = []
 
     /// TAB-completion callback. The editor invokes this when the
-    /// buffer starts with `/` (so chat lines don't trigger it) and
-    /// passes the full context — which word the user is editing
-    /// and whether that word is the command itself (first word
-    /// after `/`) or an argument. The callback returns the full
-    /// replacements for `currentWord` (just the word, not the full
-    /// line), and is `async` because argument completion typically
-    /// queries the live server. Nil disables completion entirely.
-    var completion: ((_ context: CompletionContext) async -> [String])?
+    /// buffer starts with `/` (so chat lines don't trigger it).
+    /// The callback returns a `CompletionResult` that includes
+    /// `replacing` — the chars the editor should back over before
+    /// splicing in a candidate — and the `candidates` themselves.
+    /// `replacing` defaults (for typical word-boundary completions)
+    /// to the context's `currentWord`, but the callback can extend
+    /// it to a longer suffix of the buffer when the argument
+    /// genuinely contains internal whitespace (e.g. a Hotline file
+    /// path with a space: `Heidrun Client/`). Async because
+    /// argument completion typically queries the live server.
+    var completion: ((_ context: CompletionContext) async -> CompletionResult)?
 
     /// Context handed to the `completion` callback so it can pick
     /// the right completion strategy. `fullLine` is everything from
     /// the start of the buffer up to the cursor (without the
-    /// leading `/`); `currentWord` is the word being completed
-    /// (everything from the last space to the cursor); `isFirstWord`
-    /// flags command-name vs argument completion.
+    /// leading `/`); `currentWord` is the *whitespace-delimited*
+    /// word the user is editing — useful for command-name
+    /// completion; argument completers may prefer to compute their
+    /// own replace-span and surface it via `CompletionResult.replacing`.
+    /// `isFirstWord` flags command-name vs argument completion.
     struct CompletionContext: Sendable {
         public let fullLine: String
         public let currentWord: String
         public let isFirstWord: Bool
+    }
+
+    /// Result of a TAB-completion request.
+    ///
+    /// `replacing` is the literal substring of the buffer (a suffix
+    /// of `beforeCursor`) the editor will back over before splicing
+    /// in a candidate. Every candidate MUST start with `replacing`.
+    /// `candidates` are the full replacement words.
+    struct CompletionResult: Sendable {
+        public let replacing: String
+        public let candidates: [String]
+        public init(replacing: String, candidates: [String]) {
+            self.replacing = replacing
+            self.candidates = candidates
+        }
+        public static let empty = CompletionResult(replacing: "", candidates: [])
     }
 
     private static let supportsRawMode: Bool = {
@@ -232,12 +253,16 @@ final class LineEditor {
 
     // MARK: - TAB completion
 
-    /// TAB handler: complete the word at the cursor via the
-    /// `completion` callback. No-op for chat lines (so TAB just
-    /// drops in mid-chat rather than echoing a literal `\t`).
-    /// Splices on a single match, extends to the longest common
-    /// prefix on multiple, dumps the candidate list when there's
-    /// no common extension — bash-style.
+    /// TAB handler: complete via the `completion` callback. No-op
+    /// for chat lines (so TAB just drops in mid-chat rather than
+    /// echoing a literal `\t`). The callback returns a
+    /// `CompletionResult` carrying its own notion of `replacing`,
+    /// which lets path completers extend the splice span past the
+    /// last whitespace — so e.g. a folder named "Heidrun Client"
+    /// can be TAB-completed even though the buffer contains a
+    /// space mid-arg. Splices on a single match, extends to the
+    /// longest common prefix on multiple, dumps the candidate list
+    /// when there's no common extension — bash-style.
     private func handleTabCompletion(buffer: inout [UInt8], cursor: inout Int, prompt: String) async {
         guard let completion else { return }
         let beforeCursor = String(decoding: buffer[..<cursor], as: UTF8.self)
@@ -247,7 +272,10 @@ final class LineEditor {
         let afterSlash = String(beforeCursor.dropFirst())
         // The currentWord is everything from the last space (or
         // start) to the cursor. `isFirstWord` flags whether that
-        // word is the command name itself or an argument.
+        // word is the command name itself or an argument. The
+        // completion callback may override the replace-span via
+        // `CompletionResult.replacing` (e.g. path arguments that
+        // contain whitespace).
         let lastSpace = afterSlash.lastIndex(of: " ")
         let currentWord: String
         let isFirstWord: Bool
@@ -263,34 +291,58 @@ final class LineEditor {
             currentWord: currentWord,
             isFirstWord: isFirstWord
         )
-        let matches = await completion(context).sorted()
+        let result = await completion(context)
+        let replacing = result.replacing
+        let matches = result.candidates.sorted()
         if matches.isEmpty { return }
-        if matches.count == 1 {
-            guard matches[0].hasPrefix(currentWord) else { return }
+        // Sanity: every candidate must start with `replacing` so
+        // the splice math is well-defined. Drop any that don't.
+        let validMatches = matches.filter { $0.hasPrefix(replacing) }
+        guard !validMatches.isEmpty else { return }
+        // Likewise the buffer-before-cursor must end with `replacing`
+        // (the chars the callback wants us to back over). Bail
+        // otherwise — refuse to corrupt the buffer.
+        guard beforeCursor.hasSuffix(replacing) else { return }
+        let replacingByteCount = Array(replacing.utf8).count
+
+        if validMatches.count == 1 {
+            let candidate = validMatches[0]
             // Splice in the suffix + a trailing space so the user
             // can immediately start typing the next argument. Path
             // completions that should NOT auto-trail (e.g. an open
-            // folder the user wants to descend into) can return the
-            // completion with a trailing `/` and the caller spots
-            // the trailing-`/` and omits the space — handled below.
-            let trailingSlash = matches[0].hasSuffix("/")
-            let suffix = String(matches[0].dropFirst(currentWord.count))
+            // folder the user wants to descend into) return the
+            // completion with a trailing `/` and we omit the space.
+            let trailingSlash = candidate.hasSuffix("/")
+            let suffix = String(candidate.dropFirst(replacing.count))
                 + (trailingSlash ? "" : " ")
             let suffixBytes = Array(suffix.utf8)
-            buffer.insert(contentsOf: suffixBytes, at: cursor)
-            cursor += suffixBytes.count
+            // Back over the `replacing` bytes, then insert the suffix.
+            buffer.removeSubrange((cursor - replacingByteCount)..<cursor)
+            cursor -= replacingByteCount
+            // Re-insert what we just removed so cursor lands at end
+            // of candidate, not start.
+            let candidateBytes = Array(candidate.utf8)
+            buffer.insert(contentsOf: candidateBytes, at: cursor)
+            cursor += candidateBytes.count
+            // Trailing slash → no space; otherwise an auto-space.
+            if !trailingSlash {
+                buffer.insert(0x20, at: cursor)
+                cursor += 1
+            }
+            _ = suffixBytes  // (kept above for the comment's clarity)
             redraw(prompt: prompt, buffer: buffer, cursor: cursor)
             return
         }
         // Multiple matches: bash-style — first TAB extends to the
         // longest common prefix; if there's no extension, dump the
         // candidate list on a new line and re-draw the prompt.
-        let commonPrefix = Self.longestCommonPrefix(of: matches)
-        if commonPrefix.count > currentWord.count {
-            let suffix = String(commonPrefix.dropFirst(currentWord.count))
-            let suffixBytes = Array(suffix.utf8)
-            buffer.insert(contentsOf: suffixBytes, at: cursor)
-            cursor += suffixBytes.count
+        let commonPrefix = Self.longestCommonPrefix(of: validMatches)
+        if commonPrefix.count > replacing.count {
+            // Splice up to the common prefix, no trailing space yet.
+            let extensionPart = String(commonPrefix.dropFirst(replacing.count))
+            let extensionBytes = Array(extensionPart.utf8)
+            buffer.insert(contentsOf: extensionBytes, at: cursor)
+            cursor += extensionBytes.count
             redraw(prompt: prompt, buffer: buffer, cursor: cursor)
         } else {
             write(Array("\r\n".utf8))
@@ -298,8 +350,8 @@ final class LineEditor {
             // names (so the listing reads like the prompt would);
             // path arguments are listed bare.
             let listing = isFirstWord
-                ? matches.map { "/\($0)" }.joined(separator: "  ")
-                : matches.joined(separator: "  ")
+                ? validMatches.map { "/\($0)" }.joined(separator: "  ")
+                : validMatches.joined(separator: "  ")
             write(Array(listing.utf8))
             write(Array("\r\n".utf8))
             redraw(prompt: prompt, buffer: buffer, cursor: cursor)

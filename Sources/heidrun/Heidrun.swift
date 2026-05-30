@@ -71,7 +71,10 @@ struct Heidrun: AsyncParsableCommand {
         //     commands would lead to misleading completions).
         editor.completion = { [clientHolder, cwdHolder] context in
             if context.isFirstWord {
-                return Self.builtinCommands.filter { $0.hasPrefix(context.currentWord) }
+                let matches = Self.builtinCommands.filter { $0.hasPrefix(context.currentWord) }
+                return LineEditor.CompletionResult(
+                    replacing: context.currentWord, candidates: matches
+                )
             }
             return await Self.completeArgument(
                 context: context, clientHolder: clientHolder, cwdHolder: cwdHolder
@@ -193,57 +196,100 @@ struct Heidrun: AsyncParsableCommand {
 
     /// Top-level dispatcher for `/cmd <arg…>` TAB completion.
     /// Knows the per-command argument shape — which arg index is a
-    /// path, whether it's a local or remote path, whether to stop at
-    /// the first `|` (for the pipe-separated post commands), etc.
-    /// Returns full-replacement words; LineEditor splices the suffix.
+    /// path, whether it's a local or remote path, whether to stop
+    /// at the first `|` (for the pipe-separated post commands),
+    /// and (critically) whether the command takes a SINGLE rest-of-
+    /// line path argument that may contain whitespace
+    /// (`/ls Heidrun Client/…`) vs. multiple space-separated args
+    /// (`/put local remote`).
     ///
-    /// File-area completers receive the session's Hotline cwd so
-    /// relative completions (`/ls Soft<TAB>`) resolve to the right
-    /// directory just like the command itself would.
+    /// For single-rest-of-line-path commands the replace span is
+    /// the entire argument (everything after the command's first
+    /// space), not just the last whitespace-delimited word — so
+    /// path completion works against folders whose names contain
+    /// spaces.
     private static func completeArgument(
         context: LineEditor.CompletionContext,
         clientHolder: ClientHolder,
         cwdHolder: CurrentDirectoryHolder
-    ) async -> [String] {
-        let words = context.fullLine
-            .split(separator: " ", omittingEmptySubsequences: false)
-            .map(String.init)
-        guard let cmd = words.first?.lowercased() else { return [] }
-        let argIndex = max(0, words.count - 2)
-        if context.fullLine.contains("|") {
-            return []
+    ) async -> LineEditor.CompletionResult {
+        guard let firstSpace = context.fullLine.firstIndex(of: " ") else {
+            return .empty
         }
+        let cmd = String(context.fullLine[..<firstSpace]).lowercased()
+        // Whole arg string (everything after the command, possibly
+        // empty if the user just typed `/ls `). Includes any
+        // internal whitespace — that's the whole point of using this
+        // span rather than the LineEditor's word-bounded
+        // `currentWord` for single-rest-of-line-path commands.
+        let argStart = context.fullLine.index(after: firstSpace)
+        let restOfLine = String(context.fullLine[argStart...])
+        if context.fullLine.contains("|") { return .empty }
         switch cmd {
         case "ls", "finfo", "get", "download", "cd":
-            guard argIndex == 0,
-                  let client = await clientHolder.get() else { return [] }
+            // Single rest-of-line path arg. Use restOfLine as the
+            // replace span so paths with internal spaces work.
+            guard let client = await clientHolder.get() else { return .empty }
             let cwd = await cwdHolder.get()
-            return await completeRemotePath(
-                word: context.currentWord, client: client, cwd: cwd
+            let candidates = await completeRemotePath(
+                word: restOfLine, client: client, cwd: cwd
+            )
+            return LineEditor.CompletionResult(
+                replacing: restOfLine, candidates: candidates
             )
         case "put", "upload":
+            // Two args, both space-separated → the conventional
+            // word-bounded behaviour is what the user expects here.
+            // (A v2 could add quote/escape parsing; out of scope.)
+            let words = context.fullLine
+                .split(separator: " ", omittingEmptySubsequences: false)
+                .map(String.init)
+            let argIndex = max(0, words.count - 2)
             if argIndex == 0 {
-                // Local filesystem — let the user pick from their
-                // own disk regardless of connection state.
-                return completeLocalPath(word: context.currentWord)
+                let candidates = completeLocalPath(word: context.currentWord)
+                return LineEditor.CompletionResult(
+                    replacing: context.currentWord, candidates: candidates
+                )
             }
             if argIndex == 1, let client = await clientHolder.get() {
                 let cwd = await cwdHolder.get()
-                return await completeRemotePath(
+                let candidates = await completeRemotePath(
                     word: context.currentWord, client: client, cwd: cwd
                 )
+                return LineEditor.CompletionResult(
+                    replacing: context.currentWord, candidates: candidates
+                )
             }
-            return []
-        case "tnews", "tthreads", "tread", "tpost", "treply":
-            // News bundles aren't reached via the file-area cwd —
-            // they're a separate tree on the server. Always absolute.
+            return .empty
+        case "tnews":
+            // Single rest-of-line news-bundle path. Always absolute
+            // — news isn't reached via the file-area cwd.
+            guard let client = await clientHolder.get() else { return .empty }
+            let candidates = await completeNewsPath(word: restOfLine, client: client)
+            return LineEditor.CompletionResult(
+                replacing: restOfLine, candidates: candidates
+            )
+        case "tthreads", "tread", "tpost", "treply":
+            // News path is the FIRST arg only — past that is a
+            // threadID or pipe-separated body. Use word-bounded
+            // splicing so we don't accidentally swallow a numeric
+            // threadID into the path. Same caveat as /put: a path
+            // containing whitespace can't be auto-completed for
+            // these commands (manual typing only).
+            let words = context.fullLine
+                .split(separator: " ", omittingEmptySubsequences: false)
+                .map(String.init)
+            let argIndex = max(0, words.count - 2)
             guard argIndex == 0,
-                  let client = await clientHolder.get() else { return [] }
-            return await completeNewsPath(
+                  let client = await clientHolder.get() else { return .empty }
+            let candidates = await completeNewsPath(
                 word: context.currentWord, client: client
             )
+            return LineEditor.CompletionResult(
+                replacing: context.currentWord, candidates: candidates
+            )
         default:
-            return []
+            return .empty
         }
     }
 
