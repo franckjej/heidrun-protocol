@@ -31,6 +31,16 @@ final class LineEditor {
     /// Whatever the user had typed before they started pressing ↑.
     private var savedDraft: [UInt8] = []
 
+    /// TAB-completion callback. Given the prefix the user has typed
+    /// so far (without the leading `/`), return the candidate
+    /// completions. Empty array = nothing to complete. The editor
+    /// only invokes this when the buffer starts with `/` and the
+    /// cursor is within the first whitespace-delimited word — TAB
+    /// in mid-chat (no leading `/`) is left to the default-case
+    /// drop (no literal `\t` echoed into chat). Nil disables
+    /// completion entirely.
+    var completion: ((_ prefix: String) -> [String])?
+
     private static let supportsRawMode: Bool = {
         guard let term = ProcessInfo.processInfo.environment["TERM"] else { return false }
         return !term.isEmpty && term != "dumb"
@@ -188,8 +198,15 @@ final class LineEditor {
                 // Any other ESC-sequence is dropped silently — better
                 // than echoing raw bytes into chat.
 
+            case 0x09:                        // TAB — completion
+                handleTabCompletion(
+                    buffer: &buffer,
+                    cursor: &cursor,
+                    prompt: prompt
+                )
+
             default:
-                if byte >= 0x20 || byte == 0x09 {     // printable ASCII + tab
+                if byte >= 0x20 {                 // printable ASCII
                     buffer.insert(byte, at: cursor)
                     cursor += 1
                     redraw(prompt: prompt, buffer: buffer, cursor: cursor)
@@ -198,6 +215,73 @@ final class LineEditor {
                 // silently — beats sending raw escapes into chat.
             }
         }
+    }
+
+    // MARK: - TAB completion
+
+    /// TAB handler: complete the first whitespace-delimited word of a
+    /// `/cmd` line via the `completion` callback. No-op for chat
+    /// lines (so TAB just drops in mid-chat rather than echoing a
+    /// literal `\t`) and for the case where the cursor is past the
+    /// first word (arguments aren't completed — yet).
+    private func handleTabCompletion(buffer: inout [UInt8], cursor: inout Int, prompt: String) {
+        guard let completion else { return }
+        let beforeCursor = String(decoding: buffer[..<cursor], as: UTF8.self)
+        guard beforeCursor.hasPrefix("/"), !beforeCursor.hasPrefix("//") else { return }
+        let afterSlash = beforeCursor.dropFirst()
+        // Only complete inside the first word — once a space appears
+        // before the cursor we're in argument-land which v1 doesn't
+        // know how to complete.
+        guard !afterSlash.contains(" ") else { return }
+        let prefix = String(afterSlash)
+        let matches = completion(prefix).sorted()
+        if matches.isEmpty { return }
+        if matches.count == 1 {
+            guard matches[0].hasPrefix(prefix) else { return }
+            // Splice in the suffix + a trailing space so the user
+            // can immediately start typing arguments.
+            let suffix = String(matches[0].dropFirst(prefix.count)) + " "
+            let suffixBytes = Array(suffix.utf8)
+            buffer.insert(contentsOf: suffixBytes, at: cursor)
+            cursor += suffixBytes.count
+            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+            return
+        }
+        // Multiple matches: bash-style — first TAB extends to the
+        // longest common prefix; if there's no extension, dump the
+        // candidate list on a new line and re-draw the prompt.
+        let commonPrefix = Self.longestCommonPrefix(of: matches)
+        if commonPrefix.count > prefix.count {
+            let suffix = String(commonPrefix.dropFirst(prefix.count))
+            let suffixBytes = Array(suffix.utf8)
+            buffer.insert(contentsOf: suffixBytes, at: cursor)
+            cursor += suffixBytes.count
+            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+        } else {
+            write(Array("\r\n".utf8))
+            let listing = matches.map { "/\($0)" }.joined(separator: "  ")
+            write(Array(listing.utf8))
+            write(Array("\r\n".utf8))
+            redraw(prompt: prompt, buffer: buffer, cursor: cursor)
+        }
+    }
+
+    private static func longestCommonPrefix(of strings: [String]) -> String {
+        guard let first = strings.first else { return "" }
+        var prefixEnd = first.endIndex
+        for other in strings.dropFirst() {
+            var firstIndex = first.startIndex
+            var otherIndex = other.startIndex
+            while firstIndex < prefixEnd,
+                  otherIndex < other.endIndex,
+                  first[firstIndex] == other[otherIndex] {
+                first.formIndex(after: &firstIndex)
+                other.formIndex(after: &otherIndex)
+            }
+            prefixEnd = firstIndex
+            if prefixEnd == first.startIndex { return "" }
+        }
+        return String(first[..<prefixEnd])
     }
 
     // MARK: - Word navigation

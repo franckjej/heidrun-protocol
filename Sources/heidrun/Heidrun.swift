@@ -86,6 +86,13 @@ struct Heidrun: AsyncParsableCommand {
         // readLine() when stdin isn't a TTY (piped / redirected) so
         // scripted usage still works.
         let editor = LineEditor(historyURL: Self.historyURL())
+        // TAB completes client-builtin command names. Server-side
+        // commands (like heidrun-server's `/topic`) and chat lines
+        // don't complete — the CLI doesn't know server vocabulary,
+        // and chat-line completion would clobber typing.
+        editor.completion = { prefix in
+            Self.builtinCommands.filter { $0.hasPrefix(prefix) }
+        }
         FileHandle.standardError.write(Data("→ chat ready. Type a message, or /help for commands.\n".utf8))
         while let line = editor.readLine(prompt: "> ") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -351,6 +358,32 @@ struct Heidrun: AsyncParsableCommand {
         """
         FileHandle.standardError.write(Data(text.utf8))
     }
+
+    /// Client-builtin command names, sorted for stable TAB-completion
+    /// listings. Keep this in sync with the `switch` in `handle(input:)`
+    /// and the `printHelp` block — the price of a thin CLI is three
+    /// places that need to agree on the verb list.
+    private static let builtinCommands: [String] = [
+        "exit",
+        "finfo",
+        "help",
+        "info",
+        "ls",
+        "me",
+        "msg",
+        "news",
+        "nick",
+        "post",
+        "pm",
+        "q",
+        "quit",
+        "tnews",
+        "tpost",
+        "tread",
+        "treply",
+        "tthreads",
+        "who"
+    ]
 
     /// "Re: " prefix used by `/treply` to derive the reply title from
     /// the parent's title. Chains stay one `Re:` deep
