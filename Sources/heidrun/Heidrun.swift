@@ -84,16 +84,39 @@ struct Heidrun: AsyncParsableCommand {
         // First connect uses no backoff — fail loudly if the host /
         // port / creds are wrong rather than silently retrying.
         FileHandle.standardError.write(Data("→ connecting to \(host):\(port)…\n".utf8))
-        var session = try await establishSession(settings: settings)
-        await clientHolder.set(session.client)
+        let initialSession = try await establishSession(settings: settings)
+        await clientHolder.set(initialSession.client)
         FileHandle.standardError.write(Data("→ chat ready. Type a message, or /help for commands.\n".utf8))
 
+        // Box the live session so the supervisor task can swap it on
+        // reconnect while the REPL reads the current one every iteration.
+        let sessionBox = SessionBox(initialSession)
+
+        // Proactive supervisor: as soon as the printer task's events
+        // stream ends (server died, ping failed, OS keepalive gave up),
+        // start reconnect attempts WITHOUT waiting for the user to
+        // submit a REPL line. Reads + mutates `sessionBox` to swap the
+        // live client in place.
+        let supervisorTask = Task { [clientHolder] in
+            await Self.supervise(
+                sessionBox: sessionBox,
+                clientHolder: clientHolder,
+                reconnect: { try await self.reconnectWithBackoff(settings: settings) }
+            )
+        }
+
         defer {
-            session.printerTask.cancel()
-            // `disconnect()` is async; the deferred Task wrapper is the
-            // canonical "fire-and-forget cleanup in a sync defer" shape.
-            let dyingClient = session.client
-            Task { await dyingClient.disconnect() }
+            // Cancelling the supervisor first stops it from racing the
+            // REPL teardown with another reconnect attempt. Then close
+            // the live client; the events-stream end unblocks any sleep
+            // the supervisor was in.
+            supervisorTask.cancel()
+            let box = sessionBox
+            Task {
+                let s = await box.current()
+                s.printerTask.cancel()
+                await s.client.disconnect()
+            }
         }
 
         REPL: while true {
@@ -107,23 +130,15 @@ struct Heidrun: AsyncParsableCommand {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
-            // The printer task's `for await` returns when the events
-            // stream ends — i.e. the TCP connection dropped. The
-            // alive flag flips false then; reconnect before we'd
-            // otherwise hand the dead client to `handle(input:)`.
-            if !(await session.alive.isAlive()) {
-                FileHandle.standardError.write(Data("→ connection lost, reconnecting…\n".utf8))
-                session.printerTask.cancel()
-                await session.client.disconnect()
-                do {
-                    session = try await reconnectWithBackoff(settings: settings)
-                    await clientHolder.set(session.client)
-                    FileHandle.standardError.write(Data("→ reconnected.\n".utf8))
-                } catch {
-                    FileHandle.standardError.write(Data("✗ reconnect failed: \(error)\n".utf8))
-                    break REPL
-                }
+            // The supervisor marks the box dead when reconnectWithBackoff
+            // has exhausted all attempts. At that point there's no
+            // session to hand a command to, so exit the REPL.
+            if await sessionBox.isDead() {
+                FileHandle.standardError.write(Data("✗ disconnected — giving up.\n".utf8))
+                break REPL
             }
+
+            let session = await sessionBox.current()
 
             do {
                 let keepGoing = try await handle(
@@ -152,24 +167,75 @@ struct Heidrun: AsyncParsableCommand {
     }
 
     /// Holds the per-attempt state a REPL session depends on: the
-    /// live `NIOHotlineClient`, the printer-task pumping its events
-    /// stream to stdout, and a shared "is the connection still up"
-    /// flag the printer task flips when the events stream ends.
-    /// Sendable so the REPL can reassign it on reconnect.
+    /// live `NIOHotlineClient` and the printer task pumping its
+    /// events stream to stdout. The supervisor watches `printerTask`
+    /// completion as the "connection died" signal — when the events
+    /// stream finishes, the task ends. Sendable so the supervisor
+    /// can hand a freshly-built session back to the box on reconnect.
     private struct Session: Sendable {
         let client: NIOHotlineClient
         let printerTask: Task<Void, Never>
-        let alive: SessionAlive
     }
 
-    /// Tiny actor wrapping a "connection still alive" boolean. The
-    /// printer task sets it to false when the events stream ends
-    /// (TCP drop, server kick, etc.); the REPL reads it before each
-    /// `handle(input:)` to decide whether to reconnect first.
-    private actor SessionAlive {
-        private var alive = true
-        func markDown() { alive = false }
-        func isAlive() -> Bool { alive }
+    /// Mutable holder for the current session. The supervisor task
+    /// swaps the contents on reconnect; the REPL reads the current
+    /// session at the start of each command. `isDead()` flips true
+    /// only when the supervisor has exhausted reconnectWithBackoff
+    /// — that's the signal for the REPL to exit.
+    private actor SessionBox {
+        private var session: Session
+        private var dead = false
+
+        init(_ session: Session) { self.session = session }
+        func current() -> Session { session }
+        func set(_ s: Session) { session = s }
+        func markDead() { dead = true }
+        func isDead() -> Bool { dead }
+    }
+
+    /// Background supervisor loop. Awaits the current session's
+    /// printer-task completion (which happens iff the events stream
+    /// ended, i.e. the connection died), then runs
+    /// `reconnectWithBackoff` and swaps the new session into the box.
+    /// On exhausted retries the box is marked dead so the REPL can
+    /// surface a final error and exit.
+    ///
+    /// `reconnect` is passed as a closure rather than calling
+    /// `reconnectWithBackoff` directly because this is a `static`
+    /// helper — keeping it static avoids holding a strong reference
+    /// to `self` from a long-lived background Task.
+    private static func supervise(
+        sessionBox: SessionBox,
+        clientHolder: ClientHolder,
+        reconnect: @Sendable @escaping () async throws -> Session
+    ) async {
+        while !Task.isCancelled {
+            let current = await sessionBox.current()
+            // `printerTask.value` returns when the for-await over the
+            // events stream finishes — that's the canonical "TCP
+            // session ended" signal regardless of which side closed.
+            await current.printerTask.value
+            if Task.isCancelled { return }
+
+            FileHandle.standardError.write(Data("→ connection lost, reconnecting…\n".utf8))
+            // Idempotent — the underlying client guards tearDown with
+            // `!torn`. We disconnect anyway so any held resources
+            // (NWConnection state) are released promptly.
+            await current.client.disconnect()
+
+            do {
+                let newSession = try await reconnect()
+                await sessionBox.set(newSession)
+                await clientHolder.set(newSession.client)
+                FileHandle.standardError.write(Data("→ reconnected.\n".utf8))
+            } catch is CancellationError {
+                return
+            } catch {
+                FileHandle.standardError.write(Data("✗ reconnect failed: \(error)\n".utf8))
+                await sessionBox.markDead()
+                return
+            }
+        }
     }
 
     /// Actor-wrapped mutable reference to the live `NIOHotlineClient`.
@@ -416,7 +482,6 @@ struct Heidrun: AsyncParsableCommand {
             "→ connected (server v\(info.serverVersion), socket \(info.connectionSocket))\n".utf8
         ))
 
-        let alive = SessionAlive()
         let eventStream = client.events
         let capturedNick = nickname
         let capturedIcon = icon
@@ -431,12 +496,11 @@ struct Heidrun: AsyncParsableCommand {
                 }
                 printEvent(event)
             }
-            // Stream ended → connection died. Flip the flag so the
-            // REPL's pre-command check kicks reconnect on the next
-            // line submission.
-            await alive.markDown()
+            // Stream ended → connection died. The supervisor task is
+            // awaiting `printerTask.value` and will start a reconnect
+            // attempt the moment this returns.
         }
-        return Session(client: client, printerTask: printerTask, alive: alive)
+        return Session(client: client, printerTask: printerTask)
     }
 
     /// Retry `establishSession` with capped exponential backoff. The
