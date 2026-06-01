@@ -9,43 +9,38 @@ import HeidrunCore
 /// work). The read loop / dispatch / transaction encoders mirror the Darwin
 /// HotlineNetworkClient.
 public actor NIOHotlineClient {
-    public static let keepaliveInterval: Duration = .seconds(30)
+    public static let keepaliveInterval: Duration = HotlineProtocolEngine.keepaliveInterval
 
-    private let channel: Channel
-    private let reader: ByteAccumulator
-    private let broadcaster = EventBroadcaster()
+    /// Owns the read loop, dispatch, broadcaster, keepalive, send-with-
+    /// reply correlation, and teardown. Previously this client duplicated
+    /// the Darwin one's plumbing and drifted (the missing
+    /// `broadcaster.finish()` in NIO's tearDown was what broke auto-
+    /// reconnect on Linux). One engine, one place to fix bugs.
+    private nonisolated let engine: HotlineProtocolEngine
     private let stringEncoding: String.Encoding
     private let settings: ConnectionSettings
-    /// Optional developer-console hook. See `PacketObserver` for
-    /// payload semantics. Same shape as on `HotlineNetworkClient`.
-    private let packetObserver: PacketObserver?
 
-    private var nextTaskNumber: UInt32 = 1
-    private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
     private var connectionSocket: UInt16 = 0
     private var serverVersion: Int = 0
-    private var readerTask: Task<Void, Never>?
-    private var pingTask: Task<Void, Never>?
-    private var torn = false
 
-    private init(channel: Channel, reader: ByteAccumulator,
-                 settings: ConnectionSettings, stringEncoding: String.Encoding,
-                 packetObserver: PacketObserver? = nil) {
-        self.channel = channel
-        self.reader = reader
+    private init(engine: HotlineProtocolEngine, settings: ConnectionSettings,
+                 stringEncoding: String.Encoding) {
+        self.engine = engine
         self.settings = settings
         self.stringEncoding = stringEncoding
-        self.packetObserver = packetObserver
     }
 
-    public nonisolated var events: AsyncStream<HotlineEvent> { broadcaster.makeStream() }
+    public nonisolated var events: AsyncStream<HotlineEvent> { engine.events }
 
     public var connectionInfo: HotlineConnectionInfo {
-        HotlineConnectionInfo(
-            clientVersion: 151, protocolVersion: 2, serverVersion: serverVersion,
-            connectionSocket: connectionSocket, lastTaskNumber: nextTaskNumber &- 1,
-            settings: settings
-        )
+        get async {
+            let lastTask = await engine.lastTaskNumber
+            return HotlineConnectionInfo(
+                clientVersion: 151, protocolVersion: 2, serverVersion: serverVersion,
+                connectionSocket: connectionSocket, lastTaskNumber: lastTask,
+                settings: settings
+            )
+        }
     }
 
     // MARK: Connect + handshake
@@ -62,183 +57,42 @@ public actor NIOHotlineClient {
             }
         let channel = try await bootstrap.connect(host: settings.address, port: Int(settings.port)).get()
         let reader = ByteAccumulator(stream: stream)
-        let client = NIOHotlineClient(channel: channel, reader: reader,
-                                      settings: settings, stringEncoding: stringEncoding,
-                                      packetObserver: packetObserver)
-        try await client.performHandshake()
-        await client.startReader()
-        await client.startKeepalive()
+        let transport = NIOTransport(channel: channel, reader: reader)
+        // Drain the 12-byte handshake reply over the transport BEFORE
+        // the engine starts owning the wire — pre-handshake bytes
+        // aren't framed as Hotline packets and would crash the read
+        // loop's decoder.
+        try await performHandshake(over: transport)
+        let engine = HotlineProtocolEngine(
+            transport: transport,
+            stringEncoding: stringEncoding,
+            packetObserver: packetObserver
+        )
+        let client = NIOHotlineClient(engine: engine, settings: settings, stringEncoding: stringEncoding)
+        await engine.start()
+        // NIO starts keepalive at connect time (pre-login). The Darwin
+        // client only starts it post-login. Preserving the existing per-
+        // client behaviour so a server that tolerated NIO's pre-login
+        // pings keeps tolerating them.
+        await engine.startKeepalive()
         return client
     }
 
-    private func performHandshake() async throws {
+    private static func performHandshake(over transport: NIOTransport) async throws {
         // client → server "TRTPHOTL\0\1\0\2" (12 bytes); server → "TRTP" + UInt32 (8).
         let magic: [UInt8] = [0x54, 0x52, 0x54, 0x50, 0x48, 0x4F, 0x54, 0x4C, 0x00, 0x01, 0x00, 0x02]
-        try await send(Data(magic))
-        let reply = try await reader.receiveExactly(8)
+        try await transport.send(Data(magic))
+        let reply = try await transport.receiveExactly(8)
         guard reply.prefix(4) == Data([0x54, 0x52, 0x54, 0x50]) else {
             throw HotlineError.malformedReply(reason: "bad server magic")
         }
     }
 
-    private func send(_ data: Data) async throws {
-        var buffer = channel.allocator.buffer(capacity: data.count)
-        buffer.writeBytes(data)
-        try await channel.writeAndFlush(buffer)
-    }
-
-    // MARK: Read loop + dispatch (ported from HotlineNetworkClient)
-
-    private func startReader() {
-        guard readerTask == nil else { return }
-        readerTask = Task { [weak self] in await self?.runReadLoop() }
-    }
-
-    private func runReadLoop() async {
-        while !torn {
-            do {
-                let headerData = try await reader.receiveExactly(PacketHeader.byteCount)
-                guard let header = PacketHeader(decoding: headerData) else {
-                    throw HotlineError.malformedReply(reason: "short header")
-                }
-                let body = header.dataLength > 0
-                    ? try await reader.receiveExactly(Int(header.dataLength))
-                    : Data()
-                dispatch(header: header, body: body)
-            } catch {
-                tearDown(with: error)
-                return
-            }
-        }
-    }
-
-    private func dispatch(header: PacketHeader, body: Data) {
-        let fields = PacketCodec.decodeBody(body)
-        // Developer-console hook: every inbound packet, including
-        // replies and any TX IDs we don't recognise as either
-        // requests-we-sent or info-pushes. Lets a UI flag dialect
-        // traffic.
-        packetObserver?.handle(.inbound, header, fields)
-
-        // Server-pushed ping (classID=0 request, TX 500) needs an
-        // explicit reply or the server reaps us after its keepalive
-        // window. Same protocol behaviour as the Darwin transport.
-        if header.classID == 0, header.transactionID == 500 {
-            sendInbandPingReply(taskNumber: header.taskNumber)
-            return
-        }
-
-        if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
-            if header.errorID != 0 {
-                let message = fields.string(.errorMessage, encoding: stringEncoding)
-                let typed = HotlineError.fromWire(
-                    errorID: header.errorID,
-                    kind: fields.uint16(.errorKind),
-                    message: message
-                )
-                continuation.resume(throwing: typed)
-            } else {
-                continuation.resume(returning: fields)
-            }
-            return
-        }
-
-        guard let info = InfoTransaction(rawValue: header.transactionID) else { return }
-        switch info {
-        case .relayChat:
-            let text = fields.string(.message, encoding: stringEncoding) ?? ""
-            let chat: ChatID? = fields.first(.chatReference).map { ChatID(data: $0.data) }
-            let isAction = (fields.uint16(.parameter) ?? 0) != 0
-            broadcaster.yield(.chatReceived(chat: chat, message: text, isAction: isAction))
-        case .disconnected:
-            let reason = fields.string(.errorMessage, encoding: stringEncoding)
-                ?? fields.string(.message, encoding: stringEncoding)
-            broadcaster.yield(.disconnected(reason: reason))
-        case .userChanged:
-            broadcaster.yield(.userChanged(user: User(
-                socket: fields.uint16(.socket) ?? 0,
-                icon: fields.uint16(.icon) ?? 0,
-                status: UserStatus(rawValue: fields.uint16(.status) ?? 0),
-                privileges: [],
-                nickname: fields.string(.nickname, encoding: stringEncoding) ?? "",
-                emoji: fields.string(.userEmoji, encoding: .utf8))))
-        case .userLeft:
-            broadcaster.yield(.userLeft(socket: fields.uint16(.socket) ?? 0))
-        case .message:
-            broadcaster.yield(.messageReceived(
-                from: fields.uint16(.socket) ?? 0,
-                message: fields.string(.message, encoding: stringEncoding) ?? ""))
-        case .broadcast:
-            broadcaster.yield(.broadcastReceived(
-                message: fields.string(.message, encoding: stringEncoding) ?? ""))
-        default:
-            break   // other pushes (news/private-chat/transfers) — added with HX
-        }
-    }
-
-    // MARK: Transaction helpers (ported)
-
-    private func nextTaskID() -> UInt32 { defer { nextTaskNumber &+= 1 }; return nextTaskNumber }
-
-    /// Acknowledge a server-pushed ping. Mirrors HotlineNetworkClient
-    /// — fire-and-forget reply with classID=1, txID=0, no body.
-    private func sendInbandPingReply(taskNumber: UInt32) {
-        let replyPacket = PacketCodec.encode(
-            classID: 1,
-            transactionID: 0,
-            taskNumber: taskNumber,
-            fields: []
-        )
-        Task { [weak self] in
-            try? await self?.send(replyPacket)
-        }
-        if let packetObserver {
-            let replyHeader = PacketHeader(
-                classID: 1,
-                transactionID: 0,
-                taskNumber: taskNumber,
-                errorID: 0,
-                dataLength: UInt32(replyPacket.count),
-                totalLength: UInt32(replyPacket.count)
-            )
-            packetObserver.handle(.outbound, replyHeader, [])
-        }
-    }
+    // MARK: Transaction helpers (forwarders into the engine)
 
     @discardableResult
     private func send(transactionID: UInt16, fields: [PacketField], expectsReply: Bool) async throws -> [PacketField] {
-        let taskNumber = nextTaskID()
-        let packet = PacketCodec.encode(classID: 0, transactionID: transactionID,
-                                        taskNumber: taskNumber, fields: fields)
-        if let packetObserver {
-            // Header constructed from arguments since `PacketCodec.encode`
-            // doesn't return one. lengths populated for completeness.
-            let header = PacketHeader(
-                classID: 0,
-                transactionID: transactionID,
-                taskNumber: taskNumber,
-                errorID: 0,
-                dataLength: UInt32(packet.count),
-                totalLength: UInt32(packet.count)
-            )
-            packetObserver.handle(.outbound, header, fields)
-        }
-        if expectsReply {
-            return try await withCheckedThrowingContinuation { cont in
-                pendingReplies[taskNumber] = cont
-                Task {
-                    do { try await send(packet) }
-                    catch {
-                        if let resumer = pendingReplies.removeValue(forKey: taskNumber) {
-                            resumer.resume(throwing: error)
-                        }
-                    }
-                }
-            }
-        } else {
-            try await send(packet)
-            return []
-        }
+        try await engine.send(transactionID: transactionID, fields: fields, expectsReply: expectsReply)
     }
 
     // MARK: Public operations (bot-sufficient)
@@ -598,41 +452,33 @@ public actor NIOHotlineClient {
         return String(data: field.data, encoding: encoding) ?? ""
     }
 
-    // MARK: Keepalive + teardown
-
-    private func startKeepalive() {
-        guard pingTask == nil, !torn else { return }
-        pingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: NIOHotlineClient.keepaliveInterval)
-                if Task.isCancelled { return }
-                guard let self else { return }
-                do { try await self.sendPing() } catch { await self.failAndClose(error); return }
-            }
-        }
-    }
+    // MARK: Lifecycle (forwarded to the engine)
 
     public func disconnect() async {
-        tearDown(with: HotlineError.cancelled)
+        await engine.disconnect()
+    }
+}
+
+/// Adapts a SwiftNIO `Channel` plus the inbound-byte `ByteAccumulator`
+/// to the engine's transport surface. `@unchecked Sendable` because
+/// `ByteAccumulator` is documented single-consumer (only the engine's
+/// read loop calls `receiveExactly`, never concurrently); the channel
+/// is itself Sendable by NIO's design.
+struct NIOTransport: HotlineTransport, @unchecked Sendable {
+    let channel: Channel
+    let reader: ByteAccumulator
+
+    func send(_ data: Data) async throws {
+        var buffer = channel.allocator.buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        try await channel.writeAndFlush(buffer)
     }
 
-    private func failAndClose(_ error: Error) { tearDown(with: error) }
+    func receiveExactly(_ count: Int) async throws -> Data {
+        try await reader.receiveExactly(count)
+    }
 
-    private func tearDown(with error: Error) {
-        guard !torn else { return }
-        torn = true
-        pingTask?.cancel(); pingTask = nil
-        readerTask?.cancel(); readerTask = nil
-        let pending = pendingReplies
-        pendingReplies.removeAll()
-        for (_, cont) in pending { cont.resume(throwing: error) }
-        channel.close(promise: nil)
-        // Mirror the Darwin client: stringify the error so the host
-        // sees something more informative than `→ disconnected (—)`,
-        // then `finish()` the broadcaster so anyone iterating
-        // `client.events` (the CLI's printer task → the auto-reconnect
-        // supervisor) actually observes end-of-stream and can react.
-        broadcaster.yield(.disconnected(reason: String(describing: error)))
-        broadcaster.finish()
+    func close() async {
+        try? await channel.close()
     }
 }

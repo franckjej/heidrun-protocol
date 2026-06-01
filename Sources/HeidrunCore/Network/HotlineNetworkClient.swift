@@ -21,52 +21,50 @@ public actor HotlineNetworkClient: HotlineClient {
 
     private let connection: NWConnection
     private let queue: DispatchQueue
-    private let broadcaster: EventBroadcaster
+    /// Owns the read loop, dispatch, broadcaster, keepalive, send-with-
+    /// reply correlation, and teardown. Both clients share the same
+    /// engine type — previously this plumbing was duplicated per client
+    /// and drifted (the NIO copy was missing `broadcaster.finish()`,
+    /// breaking auto-reconnect on Linux).
+    private nonisolated let engine: HotlineProtocolEngine
     let stringEncoding: String.Encoding
     let connectionSettings: ConnectionSettings
-    /// Set when the consumer attaches a developer-console / packet
-    /// inspector. Fires once per outbound encode and once per inbound
-    /// decode — see `PacketObserver`. Stays `nil` for normal connects
-    /// so there's no overhead in the hot path.
-    private let packetObserver: PacketObserver?
 
-    private var nextTaskNumber: UInt32 = 1
-    private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
     private var connectionSocket: UInt16 = 0
-    /// Latest public/main chat topic (TX 119 with Chat ID 0). Recorded
-    /// here in the read loop so a UI subscriber that starts after the
-    /// login-time push can still read the current topic via
-    /// `connectionInfo.publicChatSubject`.
-    private var publicChatSubject: String = ""
     private var protocolVersion: Int = 0
     private var serverVersion: Int = 0
     private var clientVersion: Int = 151
-    private var readerTask: Task<Void, Never>?
-    private var pingTask: Task<Void, Never>?
-    private var torn = false
     var activeTransfers: [UInt32: FileTransferActor] = [:]
 
     /// How often the keepalive task sends a `sendPing()` (transID 500)
-    /// after login. Picked to be a little under the 60-second timeout
-    /// that real Hotline servers historically used.
-    public static let keepaliveInterval: Duration = .seconds(30)
+    /// after login. Re-exported from the engine so existing callers
+    /// reading `HotlineNetworkClient.keepaliveInterval` keep working.
+    public static let keepaliveInterval: Duration = HotlineProtocolEngine.keepaliveInterval
 
     // MARK: - HotlineClient surface
 
     nonisolated public var events: AsyncStream<HotlineEvent> {
-        broadcaster.makeStream()
+        engine.events
     }
 
     public var connectionInfo: HotlineConnectionInfo {
-        HotlineConnectionInfo(
-            clientVersion: clientVersion,
-            protocolVersion: protocolVersion,
-            serverVersion: serverVersion,
-            connectionSocket: connectionSocket,
-            lastTaskNumber: nextTaskNumber &- 1,
-            settings: connectionSettings,
-            publicChatSubject: publicChatSubject
-        )
+        get async {
+            // The engine owns `lastTaskNumber` and `publicChatSubject`,
+            // so the two reads cross the actor boundary. Call sites
+            // already use `await client.connectionInfo`; the only thing
+            // that changes is the getter's internal shape.
+            let lastTask = await engine.lastTaskNumber
+            let subject = await engine.publicChatSubjectValue
+            return HotlineConnectionInfo(
+                clientVersion: clientVersion,
+                protocolVersion: protocolVersion,
+                serverVersion: serverVersion,
+                connectionSocket: connectionSocket,
+                lastTaskNumber: lastTask,
+                settings: connectionSettings,
+                publicChatSubject: subject
+            )
+        }
     }
 
     // MARK: - Lifecycle
@@ -153,30 +151,35 @@ public actor HotlineNetworkClient: HotlineClient {
         if let accepted = acceptedBox.value {
             effectiveSettings.pinnedCertificateSHA256 = accepted
         }
-        let client = HotlineNetworkClient(
-            connection: connection,
-            queue: queue,
-            settings: effectiveSettings,
+        let transport = NWConnectionTransport(connection: connection)
+        let engine = HotlineProtocolEngine(
+            transport: transport,
             stringEncoding: stringEncoding,
             packetObserver: packetObserver
         )
-        await client.startReader()
+        let client = HotlineNetworkClient(
+            connection: connection,
+            queue: queue,
+            engine: engine,
+            settings: effectiveSettings,
+            stringEncoding: stringEncoding
+        )
+        await engine.start()
         return client
     }
 
     private init(
         connection: NWConnection,
         queue: DispatchQueue,
+        engine: HotlineProtocolEngine,
         settings: ConnectionSettings,
-        stringEncoding: String.Encoding,
-        packetObserver: PacketObserver? = nil
+        stringEncoding: String.Encoding
     ) {
         self.connection = connection
         self.queue = queue
+        self.engine = engine
         self.connectionSettings = settings
         self.stringEncoding = stringEncoding
-        self.packetObserver = packetObserver
-        self.broadcaster = EventBroadcaster()
     }
 
     // MARK: - Handshake
@@ -205,307 +208,37 @@ public actor HotlineNetworkClient: HotlineClient {
         }
     }
 
-    private func startReader() {
-        guard readerTask == nil else { return }
-        readerTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runReadLoop()
-        }
-    }
+    // MARK: - Transaction helpers (thin forwarders to the engine)
 
-    private func runReadLoop() async {
-        while !torn {
-            do {
-                let headerData = try await connection.receiveExactly(PacketHeader.byteCount)
-                guard let header = PacketHeader(decoding: headerData) else {
-                    throw HotlineError.malformedReply(reason: "short header")
-                }
-                let body: Data
-                if header.dataLength > 0 {
-                    body = try await connection.receiveExactly(Int(header.dataLength))
-                } else {
-                    body = Data()
-                }
-                dispatch(header: header, body: body)
-            } catch {
-                await tearDown(with: error)
-                return
-            }
-        }
-    }
-
-    private func dispatch(header: PacketHeader, body: Data) {
-        let fields = PacketCodec.decodeBody(body)
-        // Surface every inbound packet to the developer console (when
-        // an observer is attached) BEFORE reply-correlation /
-        // event-broadcast so the console sees every transaction —
-        // including replies, errors, and server pushes for unknown
-        // transaction IDs that wouldn't be surfaced via
-        // `HotlineEvent`.
-        packetObserver?.handle(.inbound, header, fields)
-
-        // Server-pushed ping (classID=0 request carrying TX 500) needs
-        // an explicit reply or the server reaps us after its keepalive
-        // window. Vanilla Hotline replies with classID=1, txID=0, no
-        // body. Done here BEFORE reply-correlation because pings have
-        // a fresh server-allocated taskNumber that won't match any of
-        // our pendingReplies.
-        if header.classID == 0, header.transactionID == 500 {
-            sendInbandPingReply(taskNumber: header.taskNumber)
-            return
-        }
-
-        // Reply correlation: if we have a pending continuation for this
-        // task number, hand it the fields (or surface the server error).
-        if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
-            if header.errorID != 0 {
-                let message = fields.string(.errorMessage, encoding: stringEncoding)
-                let typed = HotlineError.fromWire(
-                    errorID: header.errorID,
-                    kind: fields.uint16(.errorKind),
-                    message: message
-                )
-                continuation.resume(throwing: typed)
-            } else {
-                continuation.resume(returning: fields)
-            }
-            return
-        }
-
-        // Otherwise treat it as a server push.
-        guard let info = InfoTransaction(rawValue: header.transactionID) else { return }
-        switch info {
-        case .newPost:
-            if let text = fields.string(.message, encoding: stringEncoding) {
-                broadcaster.yield(.newsPosted(text: text))
-            }
-
-        case .message:
-            let socket = fields.uint16(.socket) ?? 0
-            let text   = fields.string(.message, encoding: stringEncoding) ?? ""
-            broadcaster.yield(.messageReceived(from: socket, message: text))
-
-        case .relayChat:
-            let text = fields.string(.message, encoding: stringEncoding) ?? ""
-            let chat: ChatID? = fields.first(.chatReference).map { ChatID(data: $0.data) }
-            let isAction = (fields.uint16(.parameter) ?? 0) != 0
-            broadcaster.yield(.chatReceived(chat: chat, message: text, isAction: isAction))
-
-        case .agreement:
-            let text = fields.string(.message, encoding: stringEncoding) ?? ""
-            let auto = (fields.uint16(.autoAgree) ?? 0) != 0
-            broadcaster.yield(.agreementReceived(text: text, autoAgree: auto))
-
-        case .disconnected:
-            let reason = fields.string(.errorMessage, encoding: stringEncoding)
-                ?? fields.string(.message, encoding: stringEncoding)
-            broadcaster.yield(.disconnected(reason: reason))
-
-        case .privateChatInvitation:
-            guard let ref = fields.first(.chatReference) else { return }
-            broadcaster.yield(.privateChatInvited(
-                chat: ChatID(data: ref.data),
-                fromUser: fields.uint16(.socket) ?? 0,
-                message: fields.string(.message, encoding: stringEncoding)
-            ))
-
-        case .privateChatJoined:
-            guard let ref = fields.first(.chatReference),
-                  let entry = fields.first(.userListEntry),
-                  let user = UserListEntryCodec.decode(entry.data, encoding: stringEncoding) else { return }
-            broadcaster.yield(.privateChatJoined(chat: ChatID(data: ref.data), user: user))
-
-        case .privateChatLeft:
-            guard let ref = fields.first(.chatReference) else { return }
-            broadcaster.yield(.privateChatLeft(
-                chat: ChatID(data: ref.data),
-                socket: fields.uint16(.socket) ?? 0
-            ))
-
-        case .privateChatChangedSubject:
-            guard let ref = fields.first(.chatReference) else { return }
-            let chat = ChatID(data: ref.data)
-            let newSubject = fields.string(.chatSubject, encoding: stringEncoding) ?? ""
-            // Record the public/main chat topic (Chat ID 0) so a UI
-            // subscriber that starts observing after this push (e.g. the
-            // login-time topic push) can still seed its header from
-            // `connectionInfo.publicChatSubject`.
-            if chat.rawValue == 0 {
-                publicChatSubject = newSubject
-            }
-            broadcaster.yield(.privateChatSubjectChanged(chat: chat, subject: newSubject))
-
-        case .transferQueueUpdate:
-            broadcaster.yield(.transferQueueUpdated)
-
-        case .userChanged:
-            let user = User(
-                socket: fields.uint16(.socket) ?? 0,
-                icon: fields.uint16(.icon) ?? 0,
-                status: UserStatus(rawValue: fields.uint16(.status) ?? 0),
-                privileges: [],
-                nickname: fields.string(.nickname, encoding: stringEncoding) ?? "",
-                emoji: fields.string(.userEmoji, encoding: .utf8)
-            )
-            broadcaster.yield(.userChanged(user: user))
-
-        case .userLeft:
-            broadcaster.yield(.userLeft(socket: fields.uint16(.socket) ?? 0))
-
-        case .userList:
-            let users = fields
-                .filter { $0.key == HotlineObjectKey.userListEntry.rawValue }
-                .compactMap { UserListEntryCodec.decode($0.data, encoding: stringEncoding) }
-            broadcaster.yield(.userListReceived(users: users))
-
-        case .broadcast:
-            let text = fields.string(.message, encoding: stringEncoding) ?? ""
-            broadcaster.yield(.broadcastReceived(message: text))
-        }
-    }
-
-    private func tearDown(with error: Error?) async {
-        guard !torn else { return }
-        torn = true
-        stopKeepalive()
-        connection.cancel()
-        // Fail every pending request.
-        let pending = pendingReplies
-        pendingReplies.removeAll()
-        for cont in pending.values {
-            cont.resume(throwing: error ?? HotlineError.notConnected)
-        }
-        broadcaster.yield(.disconnected(reason: error.map(String.init(describing:))))
-        broadcaster.finish()
-    }
-
-    /// Send a `sendPing()` every `keepaliveInterval` so the server has
-    /// recent activity to base its idle-timeout decision on. A failed
-    /// ping (TCP errored, server closed) tears down immediately, which
-    /// surfaces a `.disconnected` event for the host to react to.
-    private func startKeepalive() {
-        guard pingTask == nil, !torn else { return }
-        let interval = Self.keepaliveInterval
-        pingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: interval)
-                if Task.isCancelled { return }
-                guard let self else { return }
-                do {
-                    try await self.sendPing()
-                } catch {
-                    await self.tearDown(with: error)
-                    return
-                }
-            }
-        }
-    }
-
-    private func stopKeepalive() {
-        pingTask?.cancel()
-        pingTask = nil
-    }
-
-    // MARK: - Transaction helpers
-
-    private func nextTaskID() -> UInt32 {
-        defer { nextTaskNumber &+= 1 }
-        return nextTaskNumber
-    }
-
-    /// Send a request and either return its reply fields (when the
-    /// transaction expects a reply) or resolve immediately after the
-    /// bytes leave the wire (when it doesn't).
-    /// Acknowledge a server-pushed ping (TX 500, class 0). Fire-and-
-    /// forget — no need to await the bytes leaving the wire from the
-    /// read-loop's perspective; if the send fails the next read will
-    /// surface the error. Also surfaces the reply we just emitted to
-    /// any attached `PacketObserver` so the developer console sees
-    /// the conversation balanced.
-    private func sendInbandPingReply(taskNumber: UInt32) {
-        let replyPacket = PacketCodec.encode(
-            classID: 1,
-            transactionID: 0,
-            taskNumber: taskNumber,
-            fields: []
-        )
-        Task { [weak self] in
-            try? await self?.connection.sendAsync(replyPacket)
-        }
-        if let packetObserver {
-            let replyHeader = PacketHeader(
-                classID: 1,
-                transactionID: 0,
-                taskNumber: taskNumber,
-                errorID: 0,
-                dataLength: UInt32(replyPacket.count),
-                totalLength: UInt32(replyPacket.count)
-            )
-            packetObserver.handle(.outbound, replyHeader, [])
-        }
-    }
-
-    private func send(
+    /// Send a transaction through the engine. Most ops call one of the
+    /// two helpers below; the underscore-no-prefix `send` exists so the
+    /// `HotlineClient` protocol conformance has the canonical shape.
+    func send(
         transactionID: UInt16,
         fields: [PacketField],
         expectsReply: Bool
     ) async throws -> [PacketField] {
-        let taskNumber = nextTaskID()
-        let packet = PacketCodec.encode(
-            classID: 0,
+        try await engine.send(
             transactionID: transactionID,
-            taskNumber: taskNumber,
-            fields: fields
+            fields: fields,
+            expectsReply: expectsReply
         )
-        if let packetObserver {
-            // Observer fires before the bytes leave the wire. Header
-            // bookkeeping (errorID / lengths) isn't computed for the
-            // outbound case because the consumer only needs direction
-            // + transactionID + taskNumber + fields.
-            let header = PacketHeader(
-                classID: 0,
-                transactionID: transactionID,
-                taskNumber: taskNumber,
-                errorID: 0,
-                dataLength: UInt32(packet.count),
-                totalLength: UInt32(packet.count)
-            )
-            packetObserver.handle(.outbound, header, fields)
-        }
-
-        if expectsReply {
-            return try await withCheckedThrowingContinuation { cont in
-                pendingReplies[taskNumber] = cont
-                Task {
-                    do {
-                        try await connection.sendAsync(packet)
-                    } catch {
-                        if let resumer = pendingReplies.removeValue(forKey: taskNumber) {
-                            resumer.resume(throwing: error)
-                        }
-                    }
-                }
-            }
-        } else {
-            try await connection.sendAsync(packet)
-            return []
-        }
     }
 
     @discardableResult
     func sendNoReply(transactionID: UInt16, fields: [PacketField]) async throws -> [PacketField] {
-        try await send(transactionID: transactionID, fields: fields, expectsReply: false)
+        try await engine.send(transactionID: transactionID, fields: fields, expectsReply: false)
     }
 
     @discardableResult
     func sendExpectingReply(transactionID: UInt16, fields: [PacketField]) async throws -> [PacketField] {
-        try await send(transactionID: transactionID, fields: fields, expectsReply: true)
+        try await engine.send(transactionID: transactionID, fields: fields, expectsReply: true)
     }
 
     // MARK: - Lifecycle ops
 
     public func disconnect() async {
-        await tearDown(with: nil)
+        await engine.disconnect()
     }
 
     public func requestAttention(_ flags: AttentionFlags) async {
@@ -515,8 +248,10 @@ public actor HotlineNetworkClient: HotlineClient {
     // MARK: - Authentication & presence
 
     public func sendPing() async throws {
-        // 185Ping uses transID 500.
-        try await sendNoReply(transactionID: 500, fields: [])
+        // 185Ping uses transID 500. Forwarded so callers reading
+        // `client.sendPing()` keep working; the engine owns the
+        // protocol-level send.
+        try await engine.sendPing()
     }
 
     public func login(
@@ -544,7 +279,7 @@ public actor HotlineNetworkClient: HotlineClient {
         // Start the heartbeat now that the server has authenticated us.
         // Pre-login pings would either be ignored or treated as a
         // protocol violation depending on the server.
-        startKeepalive()
+        await engine.startKeepalive()
     }
 
     public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
@@ -897,6 +632,26 @@ public actor HotlineNetworkClient: HotlineClient {
     nonisolated private func fourCharCode(from data: Data) -> FourCharCode {
         let bytes = Array(data.prefix(4)) + Array(repeating: UInt8(0), count: max(0, 4 - data.count))
         return FourCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+}
+
+/// Adapts `NWConnection` to the engine's transport surface. `NWConnection`
+/// is a reference type managed by Network.framework; wrapping it in a
+/// `Sendable` struct that holds the reference lets us hand it across actor
+/// boundaries into the engine.
+private struct NWConnectionTransport: HotlineTransport {
+    let connection: NWConnection
+
+    func send(_ data: Data) async throws {
+        try await connection.sendAsync(data)
+    }
+
+    func receiveExactly(_ count: Int) async throws -> Data {
+        try await connection.receiveExactly(count)
+    }
+
+    func close() async {
+        connection.cancel()
     }
 }
 #endif
