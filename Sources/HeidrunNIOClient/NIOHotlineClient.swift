@@ -627,6 +627,12 @@ public actor NIOHotlineClient {
         pendingReplies.removeAll()
         for (_, cont) in pending { cont.resume(throwing: error) }
         channel.close(promise: nil)
-        broadcaster.yield(.disconnected(reason: nil))
+        // Mirror the Darwin client: stringify the error so the host
+        // sees something more informative than `→ disconnected (—)`,
+        // then `finish()` the broadcaster so anyone iterating
+        // `client.events` (the CLI's printer task → the auto-reconnect
+        // supervisor) actually observes end-of-stream and can react.
+        broadcaster.yield(.disconnected(reason: String(describing: error)))
+        broadcaster.finish()
     }
 }
