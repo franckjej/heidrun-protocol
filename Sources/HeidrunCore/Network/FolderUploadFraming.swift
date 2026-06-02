@@ -6,14 +6,22 @@ public struct FolderUploadItem: Sendable, Hashable {
     /// outer-to-inner. Last component is the file or directory name.
     public var relativePath: [String]
     public var isDirectory: Bool
-    /// Empty for directories. For files this is the data fork; the
-    /// resource fork is sent as empty just like single-file uploads.
+    /// Empty for directories. For files this is the data fork.
     public var data: Data
+    /// Empty for directories or data-fork-only files. When non-empty the
+    /// bytes ride the per-item MACR block on the wire.
+    public var resourceFork: Data
 
-    public init(relativePath: [String], isDirectory: Bool, data: Data = Data()) {
+    public init(
+        relativePath: [String],
+        isDirectory: Bool,
+        data: Data = Data(),
+        resourceFork: Data = Data()
+    ) {
         self.relativePath = relativePath
         self.isDirectory = isDirectory
         self.data = data
+        self.resourceFork = resourceFork
     }
 }
 

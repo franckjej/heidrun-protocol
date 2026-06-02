@@ -263,11 +263,13 @@ final class Connection: @unchecked Sendable {
         let close: @Sendable () -> Void = { [weak self] in
             self?.connection.cancel()
         }
+        let clientResourceForks = fields.uint8(.resourceForkSupport) == 1
         let session = ServerState.Session(
             login: receivedLogin.isEmpty ? "guest" : receivedLogin,
             clientVersion: clientVersionValue,
             remoteHost: Self.formatRemoteHost(endpoint: connection.endpoint),
-            loginAt: Date()
+            loginAt: Date(),
+            supportsResourceForks: clientResourceForks
         )
         self.socketID = await state.register(
             nickname: nick,
@@ -291,16 +293,20 @@ final class Connection: @unchecked Sendable {
         // Reply with our advertised version so the client picks the
         // right news capability and the socket id we just allocated so
         // the client knows who it is on the server (used to label its
-        // own messages and to ignore self-echoes).
+        // own messages and to ignore self-echoes). Echo
+        // `resourceForkSupport` iff the client advertised it — that
+        // echo is the negotiated handshake for framed single-file
+        // downloads.
         let version = state.advertisedVersion
-        try await reply(
-            header: header,
-            fields: [
-                PacketField.uint16(.clientVersion, version),
-                PacketField.uint16(.socket, self.socketID),
-                PacketField.string(.serverName, "Heidrun Test Server", encoding: encoding)
-            ]
-        )
+        var replyFields: [PacketField] = [
+            PacketField.uint16(.clientVersion, version),
+            PacketField.uint16(.socket, self.socketID),
+            PacketField.string(.serverName, "Heidrun Test Server", encoding: encoding)
+        ]
+        if clientResourceForks {
+            replyFields.append(PacketField.uint8(.resourceForkSupport, 1))
+        }
+        try await reply(header: header, fields: replyFields)
 
         // Tell every other connected user about the new arrival so
         // their user-list panes refresh and their chat shows the join
@@ -863,15 +869,43 @@ final class Connection: @unchecked Sendable {
            let info = ResumeInfoCodec.decode(resumeField.data) {
             offset = info.dataForkOffset
         }
-        let remaining = UInt32(clamping: max(0, bytes.count - Int(offset)))
+        let remainingDataFork = UInt32(clamping: max(0, bytes.count - Int(offset)))
+
+        // Was this connection's session negotiated for framed downloads?
+        // Resume + framed isn't a supported combination today (the
+        // envelope's INFO/MACR headers wouldn't make sense over a
+        // partial data fork), so fall back to raw bytes when an offset
+        // is present even if the session is framed.
+        let session = await state.session(forSocket: self.socketID)
+        let framed = (session?.supportsResourceForks ?? false) && offset == 0
+        let resourceFork = framed ? state.vfs.resourceFork(at: path, name: name) : Data()
+
+        let transferSize: UInt32
+        if framed {
+            let nameBytes = name.data(using: encoding, allowLossyConversion: true) ?? Data()
+            transferSize = UploadFraming.totalSize(
+                nameLength: nameBytes.count,
+                dataLength: remainingDataFork,
+                resourceLength: UInt32(resourceFork.count)
+            )
+        } else {
+            transferSize = remainingDataFork
+        }
+
         let transferID = await state.registerTransfer(
-            .download(path: path, name: name, dataForkOffset: offset)
+            .download(
+                path: path,
+                name: name,
+                dataForkOffset: offset,
+                framed: framed,
+                resourceFork: resourceFork
+            )
         )
         try await reply(
             header: header,
             fields: [
                 .uint32(.transferID, transferID),
-                .uint32(.transferSize, remaining)
+                .uint32(.transferSize, transferSize)
             ]
         )
     }

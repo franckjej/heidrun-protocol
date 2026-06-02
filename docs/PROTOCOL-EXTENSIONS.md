@@ -49,6 +49,8 @@ naturally). This is what makes the extensions safe to send to any peer.
 | Field key | Name        | Type        | Since            |
 |-----------|-------------|-------------|------------------|
 | `0xE000`  | `userEmoji` | UTF-8 string | protocol rc7 / server rc5 |
+| `0xE001`  | `errorKind` | `UInt16`    | protocol rc12 |
+| `0xE002`  | `resourceForkSupport` | `UInt8` (= 1) | TBD |
 
 ---
 
@@ -166,11 +168,80 @@ never clears the other unintentionally.
 
 ---
 
+## `resourceForkSupport` — framed single-file downloads
+
+Capability flag advertising that an endpoint supports the FILP/INFO/DATA/MACR
+envelope on **single-file downloads** (TX 202). When both peers send it, the
+side channel for a single-file download ships the framed envelope and the
+resource fork survives end-to-end. When either side omits it, the side channel
+falls back to **raw data-fork bytes** — the classic Heidrun dialect — and the
+resource fork can't be carried (use a one-item folder download for that case).
+
+### Field
+
+```
+key:   0xE002  (resourceForkSupport)
+value: UInt8 == 1
+```
+
+The single-byte value is `1` whenever present; future flags can be packed into
+extra bits if the need arises. A receiver that finds any other value should
+treat it as "not supported".
+
+### Where it travels
+
+**Client → server**
+
+| Transaction | ID  | `resourceForkSupport` presence |
+|-------------|-----|--------------------------------|
+| `login`             | 107 | Send when the client can parse the framed envelope on download; omit otherwise. |
+| `agreeToAgreement`  | 121 | Same rule as login. |
+
+**Server → client**
+
+| Transaction | ID  | `resourceForkSupport` presence |
+|-------------|-----|--------------------------------|
+| `login` reply       | 107 | Server **echoes the field iff** it received it AND it can produce the framed envelope. The echo is the negotiated handshake. |
+
+A session is "framed" only when the server echoes the field back on the login
+reply. Without the echo the client must read the download side channel as raw
+bytes (the historical Heidrun dialect).
+
+### Wire effect when negotiated
+
+On a successful TX 202 (`downloadFile`):
+
+1. The reply's `transferSize` is the **whole envelope length** computed by
+   `UploadFraming.totalSize(nameLength:dataLength:resourceLength:)`, not just
+   the data-fork length.
+2. The HTXF side channel carries the standard 16-byte preamble followed by the
+   FILP+INFO+DATA+resource-fork+MACR bytes the same encoder produces for
+   uploads. The decoder (`UploadFraming.decode`) is symmetric.
+
+When **not** negotiated, the side channel after the preamble is the raw data
+fork from the requested offset onwards — byte-for-byte identical to the
+pre-extension behaviour, so legacy clients keep working with no change.
+
+### Compatibility matrix
+
+| Sender client | Server      | Result |
+|---------------|-------------|--------|
+| Heidrun (sends 0xE002) | Heidrun (echoes 0xE002) | ✅ framed single-file downloads; resource fork carried |
+| Heidrun       | legacy / non-echoing | client sees no echo → expects raw bytes → no resource fork (same as today) |
+| legacy        | Heidrun     | server sees no flag → server emits raw bytes → no resource fork (same as today) |
+| legacy        | legacy      | unchanged |
+
+In every row the data fork still arrives correctly; only the resource fork is
+gated on the negotiation.
+
+---
+
 ## Versioning
 
 | Extension   | Introduced |
 |-------------|------------|
 | `0xE000` field band, `userEmoji` | `heidrun-protocol` **v1.0.0-rc7**, `heidrun-server` **v1.0.0-rc5** (2026-05) |
+| `0xE002` `resourceForkSupport`   | `heidrun-protocol` **v1.0.0-rc14**, `heidrun-server` **TBD** |
 
 When adding a new extension: append a field key in the `0xE000` band, document
 it here with its wire layout, keep it additive (omittable / trailing), and make

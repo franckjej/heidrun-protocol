@@ -45,12 +45,14 @@ enum TransferListener {
             defer { Task { await state.deregisterActiveTransfer(id: transferID) } }
 
             switch pending {
-            case .download(let path, let name, let offset):
+            case .download(let path, let name, let offset, let framed, let resourceFork):
                 try await streamDownload(
                     connection: connection,
                     path: path,
                     name: name,
                     offset: offset,
+                    framed: framed,
+                    resourceFork: resourceFork,
                     state: state
                 )
             case .upload(let path, let name, let size, let resume):
@@ -73,14 +75,20 @@ enum TransferListener {
 
     // MARK: - Download side
 
-    /// Bare-bones single-file download: write `data[offset..<end]` to the
-    /// side channel and close. The production client iterates these
-    /// bytes raw into the destination file (no FILP envelope).
+    /// Single-file download stream. By default (legacy Heidrun dialect)
+    /// the bytes from `offset` are written raw to the side channel.
+    /// When `framed` is true the bytes are wrapped in the standard
+    /// FILP/INFO/DATA/MACR envelope so the resource fork rides through.
+    /// `framed` is set by the control channel handler iff the client
+    /// advertised — and the server echoed — `resourceForkSupport` on
+    /// login, AND `offset == 0` (resume + framed isn't a sensible combo).
     private static func streamDownload(
         connection: NWConnection,
         path: [String],
         name: String,
         offset: UInt32,
+        framed: Bool,
+        resourceFork: Data,
         state: ServerState
     ) async throws {
         guard let bytes = state.vfs.bytes(at: path, name: name) else {
@@ -88,6 +96,26 @@ enum TransferListener {
         }
         let start = min(Int(offset), bytes.count)
         let tail = bytes.suffix(from: bytes.startIndex.advanced(by: start))
+
+        if framed {
+            // Look up creation/modification dates + type/creator from
+            // the VFS so the INFO block reflects the stored metadata.
+            // Falls back to defaults when the entry exists but the
+            // metadata isn't set.
+            let metadata = state.vfs.info(at: path, name: name)
+            let envelope = UploadFraming.encode(
+                fileName: name,
+                type: metadata?.1.type ?? .file,
+                creator: metadata?.1.creator ?? .unknown,
+                creationDate: metadata?.1.created ?? Date(),
+                modificationDate: metadata?.1.modified ?? Date(),
+                data: Data(tail),
+                resourceFork: resourceFork
+            )
+            try await connection.sendAsync(envelope)
+            return
+        }
+
         let chunkSize = 16 * 1024
         // Per-chunk sleep when the CLI asked for a throttle. Floored at
         // 1ms so the runtime can actually honour the request — sub-ms
@@ -160,6 +188,7 @@ enum TransferListener {
                 at: path,
                 name: storedName,
                 data: parsed.data,
+                resourceFork: parsed.resourceFork,
                 type: parsed.type,
                 creator: parsed.creator
             )

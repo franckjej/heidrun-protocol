@@ -34,7 +34,17 @@ public actor HotlineNetworkClient: HotlineClient {
     private var protocolVersion: Int = 0
     private var serverVersion: Int = 0
     private var clientVersion: Int = 151
+    /// `true` after the server echoed `.resourceForkSupport` on the TX
+    /// 107 login reply. When set, single-file downloads ship the
+    /// FILP/INFO/DATA/MACR envelope and carry the resource fork.
+    public private(set) var serverSupportsResourceForks: Bool = false
     var activeTransfers: [UInt32: FileTransferActor] = [:]
+    /// Resource-fork bytes recovered from a framed `downloadStream`
+    /// after the FILP envelope has been decoded. Persists past the
+    /// activeTransfers cleanup so the caller can `consumeResourceFork`
+    /// once the stream has finished. Read-once semantics (the accessor
+    /// removes the entry) keep this map bounded.
+    var bufferedResourceForks: [UInt32: Data] = [:]
 
     /// How often the keepalive task sends a `sendPing()` (transID 500)
     /// after login. Re-exported from the engine so existing callers
@@ -263,7 +273,8 @@ public actor HotlineNetworkClient: HotlineClient {
             .obfuscatedString(.password, password, encoding: stringEncoding),
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
-            .uint16(.clientVersion, UInt16(clientVersion))
+            .uint16(.clientVersion, UInt16(clientVersion)),
+            .uint8(.resourceForkSupport, 1)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         let reply = try await sendExpectingReply(transactionID: 107, fields: fields)
@@ -276,6 +287,10 @@ public actor HotlineNetworkClient: HotlineClient {
         if let socket = reply.uint16(.socket) {
             self.connectionSocket = socket
         }
+        // Capability negotiation (Heidrun extension 0xE002): the server
+        // only echoes the field when it actually supports the framed
+        // single-file download path. No echo = fall back to raw bytes.
+        self.serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
         // Start the heartbeat now that the server has authenticated us.
         // Pre-login pings would either be ignored or treated as a
         // protocol violation depending on the server.
@@ -285,7 +300,8 @@ public actor HotlineNetworkClient: HotlineClient {
     public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
         var fields: [PacketField] = [
             .string(.nickname, nickname, encoding: stringEncoding),
-            .uint16(.icon, icon)
+            .uint16(.icon, icon),
+            .uint8(.resourceForkSupport, 1)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         try await sendNoReply(transactionID: 121, fields: fields)

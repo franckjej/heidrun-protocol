@@ -47,9 +47,14 @@ extension HotlineNetworkClient {
         }
         let totalSize = reply.uint32(.transferSize) ?? 0
 
+        // The session is framed iff the server echoed
+        // `resourceForkSupport` on login AND we requested a fresh
+        // download (resume + framed isn't a supported combo on the
+        // server side, so we match that).
+        let framed = serverSupportsResourceForks && resume.isFresh
         let actor = try await openSideChannel(transferID: transferID, totalSize: UInt64(totalSize))
         activeTransfers[transferID] = actor
-        return TransferHandle(transferID: transferID, totalSize: UInt64(totalSize))
+        return TransferHandle(transferID: transferID, totalSize: UInt64(totalSize), framed: framed)
     }
 
     public func startFolderDownload(at path: RemotePath, name: String) async throws -> TransferHandle {
@@ -113,6 +118,7 @@ extension HotlineNetworkClient {
         creator: FourCharCode,
         creationDate: Date,
         modificationDate: Date,
+        resourceFork: Data,
         progress: (@Sendable (UInt64) async -> Void)?
     ) async throws {
         guard let actor = activeTransfers[handle.transferID] else {
@@ -122,7 +128,8 @@ extension HotlineNetworkClient {
         let nameBytes = fileName.data(using: stringEncoding, allowLossyConversion: true) ?? Data()
         let total = UploadFraming.totalSize(
             nameLength: nameBytes.count,
-            dataLength: UInt32(content.count)
+            dataLength: UInt32(content.count),
+            resourceLength: UInt32(resourceFork.count)
         )
 
         // Re-send the HTXF handshake with the now-known total size. The
@@ -134,7 +141,7 @@ extension HotlineNetworkClient {
         )
 
         // FILP + INFO + DATA hdr, then data-fork bytes in chunks (so
-        // progress fires mid-transfer), then MACR trailer.
+        // progress fires mid-transfer), then MACR trailer + resource fork.
         let prefix = UploadFraming.encodePrefix(
             fileName: fileName,
             type: type,
@@ -157,7 +164,7 @@ extension HotlineNetworkClient {
             if let progress { await progress(sent) }
         }
 
-        try await actor.sendBytes(UploadFraming.encodeSuffix())
+        try await actor.sendBytes(UploadFraming.encodeSuffix(resourceFork: resourceFork))
         await actor.finishUpload()
         activeTransfers.removeValue(forKey: handle.transferID)
     }
@@ -199,7 +206,8 @@ extension HotlineNetworkClient {
     /// Drive the per-item handshake for a folder upload started with
     /// `startFolderUpload(...)`. Sub-directories appear as items with
     /// `isDirectory == true` and empty `data`; files carry the data
-    /// fork (resource fork is sent empty).
+    /// fork and, when present, the resource fork on the per-item MACR
+    /// block.
     public func sendFolderUpload(
         _ items: [FolderUploadItem],
         for handle: TransferHandle,
@@ -251,8 +259,9 @@ extension HotlineNetworkClient {
             case .resume:
                 // Server sends UInt16 length + N bytes of resume info.
                 // We parse the data-fork offset and skip that many bytes
-                // off the front of our payload (resource fork is always
-                // empty in this implementation).
+                // off the front of our payload; the resource fork ships
+                // whole regardless (it's tiny relative to the data fork
+                // and resume's defined against the data fork).
                 let blobSize = try await actor.receiveUInt16()
                 let blob = try await actor.receiveExactly(Int(blobSize))
                 let info = ResumeInfoCodec.decode(blob) ?? ResumeInfo()
@@ -315,7 +324,8 @@ extension HotlineNetworkClient {
 
         let total = UploadFraming.totalSize(
             nameLength: nameBytes.count,
-            dataLength: UInt32(dataPayload.count)
+            dataLength: UInt32(dataPayload.count),
+            resourceLength: UInt32(item.resourceFork.count)
         )
 
         // The server expects the per-item total size as a UInt32 before
@@ -331,6 +341,7 @@ extension HotlineNetworkClient {
             creationDate: creationDate,
             modificationDate: modificationDate,
             data: dataPayload,
+            resourceFork: item.resourceFork,
             encoding: stringEncoding
         )
         try await actor.sendBytes(framed)
@@ -355,6 +366,58 @@ extension HotlineNetworkClient {
         }
     }
 
+    /// Internal accessor — used by `downloadStream` after a framed
+    /// envelope is decoded to stash the resource fork until the caller
+    /// claims it via `consumeResourceFork`.
+    func storeBufferedResourceFork(_ data: Data, for transferID: UInt32) {
+        bufferedResourceForks[transferID] = data
+    }
+
+    /// Claim the resource fork buffered during the most recent framed
+    /// `downloadStream` for this `transferID`. Read-once: subsequent
+    /// calls return empty `Data`. Always returns empty for non-framed
+    /// transfers, for sessions where the server didn't echo
+    /// `resourceForkSupport`, or for files with no resource fork.
+    public func consumeResourceFork(for transferID: UInt32) -> Data {
+        bufferedResourceForks.removeValue(forKey: transferID) ?? Data()
+    }
+
+    /// Download a single file as a fully-parsed `UploadEnvelope`. Only
+    /// valid for handles where `framed == true` (the session negotiated
+    /// `resourceForkSupport` on login).
+    ///
+    /// The whole envelope is buffered in memory before decoding. Fine
+    /// for typical Mac files (icons, documents); for multi-GB downloads
+    /// use `downloadStream(for:)` and accept the data-fork-only result.
+    public func downloadEnvelope(for handle: TransferHandle) async throws -> UploadEnvelope {
+        guard handle.framed else {
+            throw HotlineError.malformedReply(
+                reason: "downloadEnvelope requires a framed transfer; the session didn't negotiate resourceForkSupport"
+            )
+        }
+        guard let actor = activeTransfers[handle.transferID] else {
+            throw HotlineError.notConnected
+        }
+        var buffer = Data()
+        buffer.reserveCapacity(Int(handle.totalSize))
+        do {
+            for try await chunk in actor.bytes() {
+                buffer.append(chunk)
+                if buffer.count >= Int(handle.totalSize) { break }
+            }
+        } catch {
+            activeTransfers.removeValue(forKey: handle.transferID)
+            throw error
+        }
+        activeTransfers.removeValue(forKey: handle.transferID)
+        return try UploadFraming.decode(buffer, encoding: stringEncoding)
+    }
+
+    /// Stream a download's data-fork bytes. Works in both modes —
+    /// against a non-framed handle the bytes pass through raw, against
+    /// a framed one the side channel is buffered + decoded and only the
+    /// data fork is yielded (the resource fork is silently dropped on
+    /// this path; use `downloadEnvelope` to keep it).
     nonisolated public func downloadStream(for handle: TransferHandle) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             Task { [weak self] in
@@ -366,10 +429,43 @@ extension HotlineNetworkClient {
                     continuation.finish(throwing: HotlineError.notConnected)
                     return
                 }
-                for try await chunk in actor.bytes() {
-                    continuation.yield(chunk)
+                if handle.framed {
+                    var buffer = Data()
+                    buffer.reserveCapacity(Int(handle.totalSize))
+                    do {
+                        for try await chunk in actor.bytes() {
+                            buffer.append(chunk)
+                            if buffer.count >= Int(handle.totalSize) { break }
+                        }
+                        let encoding = self.stringEncoding
+                        let envelope = try UploadFraming.decode(buffer, encoding: encoding)
+                        // Stash the resource fork so `consumeResourceFork`
+                        // can hand it to the caller after the stream
+                        // finishes. Skipped for empty forks to keep the
+                        // map honest about "has a fork to claim".
+                        if !envelope.resourceFork.isEmpty {
+                            await self.storeBufferedResourceFork(
+                                envelope.resourceFork,
+                                for: handle.transferID
+                            )
+                        }
+                        if !envelope.data.isEmpty {
+                            continuation.yield(envelope.data)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                } else {
+                    do {
+                        for try await chunk in actor.bytes() {
+                            continuation.yield(chunk)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 }
-                continuation.finish()
             }
         }
     }

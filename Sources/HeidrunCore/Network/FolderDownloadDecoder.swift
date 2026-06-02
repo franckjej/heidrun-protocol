@@ -9,6 +9,10 @@ public struct FolderDownloadItem: Sendable {
     /// these are the bytes the caller should *append* to the existing
     /// partial file at that offset.
     public let data: Data
+    /// Resource fork bytes. Empty for directories and data-fork-only
+    /// files. Carries whatever the server wrote into the per-item MACR
+    /// block.
+    public let resourceFork: Data
     /// Where the `data` bytes belong in the destination file. `0` for a
     /// fresh download; the value the caller's resume provider returned
     /// when resuming.
@@ -23,6 +27,7 @@ public struct FolderDownloadItem: Sendable {
         relativePath: [String],
         isDirectory: Bool,
         data: Data = Data(),
+        resourceFork: Data = Data(),
         dataForkOffset: UInt32 = 0,
         type: FourCharCode = .file,
         creator: FourCharCode = .unknown,
@@ -33,6 +38,7 @@ public struct FolderDownloadItem: Sendable {
         self.relativePath = relativePath
         self.isDirectory = isDirectory
         self.data = data
+        self.resourceFork = resourceFork
         self.dataForkOffset = dataForkOffset
         self.type = type
         self.creator = creator
@@ -78,8 +84,8 @@ public typealias FolderDownloadResumeProvider = @Sendable ([String]) -> ResumeIn
 /// 16-byte DATA fork header (last 4 bytes = UInt32 dataLength)
 /// dataLength bytes of data fork
 /// 16-byte MACR fork header (last 4 bytes = UInt32 resourceLength)
-/// resourceLength bytes of resource fork  (discarded — modern macOS
-///                                          doesn't use them)
+/// resourceLength bytes of resource fork  (surfaced on the yielded
+///                                          item as `resourceFork`)
 /// ```
 public enum FolderDownloadDecoder {
 
@@ -184,14 +190,15 @@ public enum FolderDownloadDecoder {
         let macrHeader = try await actor.receiveExactly(16)
         var macrCursor = ByteCursor(data: macrHeader, offset: 12)
         let resLength: UInt32 = macrCursor.readBigEndian()
-        if resLength > 0 {
-            _ = try await actor.receiveExactly(Int(resLength))
-        }
+        let resourceFork: Data = resLength > 0
+            ? try await actor.receiveExactly(Int(resLength))
+            : Data()
 
         return FolderDownloadItem(
             relativePath: parsed.components,
             isDirectory: false,
             data: dataFork,
+            resourceFork: resourceFork,
             dataForkOffset: dataForkOffset,
             type: FourCharCode(rawValue: meta.type),
             creator: FourCharCode(rawValue: meta.creator),

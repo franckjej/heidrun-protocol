@@ -119,8 +119,10 @@ swift run HeidrunTestServer
   `UploadFraming.secondsSince1904`.
 - File upload framing: `FILP` 40-byte header (forkCount=3) → `INFO`
   block (74 + nameLen) with HFS type/creator + 1904-epoch dates +
-  name → `DATA` fork hdr (16B) + data fork → `MACR` fork hdr (16B;
-  resource fork is empty in this implementation).
+  name → `DATA` fork hdr (16B) + data fork → `MACR` fork hdr (16B)
+  + resource fork. Resource fork rides the MACR trailer end-to-end
+  on single-file uploads, folder uploads, and folder downloads;
+  pass an empty `Data` for data-fork-only files.
 
 ## License
 

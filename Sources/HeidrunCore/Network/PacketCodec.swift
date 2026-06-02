@@ -16,6 +16,10 @@ public struct PacketField: Sendable, Hashable {
     }
 
     /// Convenience for big-endian fixed-width integer fields.
+    public static func uint8(_ key: HotlineObjectKey, _ value: UInt8) -> PacketField {
+        PacketField(key: key, data: Data([value]))
+    }
+
     public static func uint16(_ key: HotlineObjectKey, _ value: UInt16) -> PacketField {
         var data = Data()
         data.appendBigEndian(value)
@@ -113,6 +117,12 @@ extension Sequence where Element == PacketField {
     /// First field with a matching key, if any.
     public func first(_ key: HotlineObjectKey) -> PacketField? {
         first(where: { $0.key == key.rawValue })
+    }
+
+    /// Single-byte integer at the given key, or `nil` when absent / empty.
+    public func uint8(_ key: HotlineObjectKey) -> UInt8? {
+        guard let field = first(key), let firstByte = field.data.first else { return nil }
+        return firstByte
     }
 
     /// Big-endian integer at the given key, or `nil` when absent or the

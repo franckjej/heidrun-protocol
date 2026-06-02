@@ -22,6 +22,9 @@ public actor NIOHotlineClient {
 
     private var connectionSocket: UInt16 = 0
     private var serverVersion: Int = 0
+    /// `true` after the server echoed `.resourceForkSupport` on TX 107.
+    /// When set, single-file downloads ship the FILP envelope.
+    public private(set) var serverSupportsResourceForks: Bool = false
 
     private init(engine: HotlineProtocolEngine, settings: ConnectionSettings,
                  stringEncoding: String.Encoding) {
@@ -104,12 +107,15 @@ public actor NIOHotlineClient {
             .obfuscatedString(.password, password, encoding: stringEncoding),
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
-            .uint16(.clientVersion, 151)
+            .uint16(.clientVersion, 151),
+            .uint8(.resourceForkSupport, 1)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         let reply = try await send(transactionID: 107, fields: fields, expectsReply: true)
         if let server = reply.uint16(.clientVersion) { serverVersion = Int(server) }
         if let socket = reply.uint16(.socket) { connectionSocket = socket }
+        // Capability negotiation (Heidrun extension 0xE002).
+        serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
     }
 
     public func sendChat(_ message: String, in chat: ChatID?, isAction: Bool) async throws {
@@ -174,7 +180,8 @@ public actor NIOHotlineClient {
     public func agreeToAgreement(nickname: String, icon: UInt16, emoji: String? = nil) async throws {
         var fields: [PacketField] = [
             .string(.nickname, nickname, encoding: stringEncoding),
-            .uint16(.icon, icon)
+            .uint16(.icon, icon),
+            .uint8(.resourceForkSupport, 1)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         try await send(transactionID: 121, fields: fields, expectsReply: false)
@@ -293,13 +300,16 @@ public actor NIOHotlineClient {
     /// Upload a local file. Sends TX 203 with the announced size,
     /// pulls `transferID` from the reply, opens an HTXF side channel,
     /// and streams the FILP envelope + data fork from disk so a
-    /// multi-GB upload doesn't sit in memory.
+    /// multi-GB upload doesn't sit in memory. Pass `resourceFork` when
+    /// the file has a resource fork to ship in the MACR trailer (left
+    /// empty by default — most modern uploads are data-fork only).
     public func uploadFile(
         at path: RemotePath,
         name: String,
         from source: URL,
         type: HeidrunCore.FourCharCode,
         creator: HeidrunCore.FourCharCode,
+        resourceFork: Data = Data(),
         progress: (@Sendable (UInt64, UInt64) async -> Void)? = nil
     ) async throws {
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
@@ -329,6 +339,7 @@ public actor NIOHotlineClient {
             creator: creator,
             creationDate: creationDate,
             modificationDate: modificationDate,
+            resourceFork: resourceFork,
             encoding: stringEncoding,
             progress: progress
         )

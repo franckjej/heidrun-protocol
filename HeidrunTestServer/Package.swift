@@ -17,13 +17,13 @@ let package = Package(
         .target(
             name: "HeidrunTestServerKit",
             dependencies: [
-                .product(name: "HeidrunCore", package: "HeidrunCore")
+                .product(name: "HeidrunCore", package: "heidrun-protocol")
             ]
         ),
         .executableTarget(
             name: "HeidrunTestServer",
             dependencies: [
-                .product(name: "HeidrunCore", package: "HeidrunCore"),
+                .product(name: "HeidrunCore", package: "heidrun-protocol"),
                 "HeidrunTestServerKit"
             ]
         ),
@@ -31,7 +31,7 @@ let package = Package(
             name: "HeidrunTestServerKitTests",
             dependencies: [
                 "HeidrunTestServerKit",
-                .product(name: "HeidrunCore", package: "HeidrunCore")
+                .product(name: "HeidrunCore", package: "heidrun-protocol")
             ]
         )
     ],

@@ -106,9 +106,18 @@ public struct TransferHandle: Sendable, Hashable, Identifiable {
     /// Total bytes the server expects to send / receive.
     public let totalSize: UInt64
 
-    public init(transferID: UInt32, totalSize: UInt64) {
+    /// `true` when the side channel for this transfer ships the FILP
+    /// envelope (data fork + resource fork + metadata) rather than raw
+    /// data-fork bytes. Set by `startDownload(...)` when the session
+    /// negotiated `resourceForkSupport`. `downloadStream(for:)` reads
+    /// this to transparently extract the data fork; `downloadEnvelope`
+    /// requires `framed == true`.
+    public let framed: Bool
+
+    public init(transferID: UInt32, totalSize: UInt64, framed: Bool = false) {
         self.transferID = transferID
         self.totalSize = totalSize
+        self.framed = framed
     }
 
     public var id: UInt32 { transferID }
@@ -393,13 +402,39 @@ public protocol HotlineClient: Sendable {
     /// callers concatenate to disk or wherever they want the bytes.
     func downloadStream(for handle: TransferHandle) -> AsyncThrowingStream<Data, Error>
 
+    /// Download a single file as a fully-parsed `UploadEnvelope`
+    /// (data fork + resource fork + metadata). Requires the session to
+    /// have negotiated `resourceForkSupport` on login — check
+    /// `serverSupportsResourceForks` first. Buffers the whole envelope
+    /// in memory; for multi-GB downloads use `downloadStream` and
+    /// accept losing the resource fork.
+    func downloadEnvelope(for handle: TransferHandle) async throws -> UploadEnvelope
+
+    /// Claim the resource fork buffered during the most recent framed
+    /// `downloadStream(for:)`. Read-once: subsequent calls return an
+    /// empty `Data`. Always empty for non-framed handles, files with
+    /// no resource fork, or sessions that didn't negotiate
+    /// `resourceForkSupport`. Lets callers stream the data fork
+    /// through `downloadStream` for progress and pick up the resource
+    /// fork afterward.
+    func consumeResourceFork(for transferID: UInt32) async -> Data
+
+    /// `true` after a `login(...)` against a server that echoed the
+    /// `resourceForkSupport` capability (Heidrun extension 0xE002).
+    /// When set, `startDownload(...)` returns a `TransferHandle` whose
+    /// side channel ships the FILP/INFO/DATA/MACR envelope, suitable
+    /// for `downloadEnvelope(for:)`. When unset the side channel is
+    /// raw data-fork bytes and only `downloadStream(for:)` works.
+    var serverSupportsResourceForks: Bool { get async }
+
     /// Send the bytes for an upload started with `startUpload(...)`.
     ///
-    /// `content` is the data fork; the resource fork is sent as empty.
-    /// `type` and `creator` are the four-character HFS-style codes the
-    /// server stores alongside the file. Times default to "now" — the
-    /// server has its own concept of when the file was created so this
-    /// is mostly informational.
+    /// `content` is the data fork. `resourceFork` rides the MACR trailer
+    /// — pass empty data for the common data-fork-only case. `type` and
+    /// `creator` are the four-character HFS-style codes the server stores
+    /// alongside the file. Times default to "now" — the server has its
+    /// own concept of when the file was created so this is mostly
+    /// informational.
     ///
     /// `progress` is called with the cumulative count of data-fork bytes
     /// (not framing overhead) that have been pushed to the side channel.
@@ -412,6 +447,7 @@ public protocol HotlineClient: Sendable {
         creator: FourCharCode,
         creationDate: Date,
         modificationDate: Date,
+        resourceFork: Data,
         progress: (@Sendable (UInt64) async -> Void)?
     ) async throws
 
@@ -432,8 +468,8 @@ public protocol HotlineClient: Sendable {
 }
 
 extension HotlineClient {
-    /// Convenience overload that defaults the metadata to "now" and
-    /// generic file/creator codes.
+    /// Convenience overload that defaults the metadata to "now",
+    /// generic file/creator codes, and an empty resource fork.
     public func sendUpload(
         _ content: Data,
         for handle: TransferHandle,
@@ -449,6 +485,33 @@ extension HotlineClient {
             creator: .unknown,
             creationDate: now,
             modificationDate: now,
+            resourceFork: Data(),
+            progress: progress
+        )
+    }
+
+    /// Convenience overload that keeps the explicit metadata but defaults
+    /// the resource fork to empty so existing data-fork-only callers can
+    /// stay on the old signature.
+    public func sendUpload(
+        _ content: Data,
+        for handle: TransferHandle,
+        fileName: String,
+        type: FourCharCode,
+        creator: FourCharCode,
+        creationDate: Date,
+        modificationDate: Date,
+        progress: (@Sendable (UInt64) async -> Void)?
+    ) async throws {
+        try await sendUpload(
+            content,
+            for: handle,
+            fileName: fileName,
+            type: type,
+            creator: creator,
+            creationDate: creationDate,
+            modificationDate: modificationDate,
+            resourceFork: Data(),
             progress: progress
         )
     }

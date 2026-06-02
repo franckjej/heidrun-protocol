@@ -39,12 +39,14 @@ enum FileEncoders {
 struct UploadParseResult {
     var fileName: String
     var data: Data
+    var resourceFork: Data
     var type: HeidrunCore.FourCharCode
     var creator: HeidrunCore.FourCharCode
 
     init(envelope: UploadEnvelope) {
         self.fileName = envelope.fileName
         self.data = envelope.data
+        self.resourceFork = envelope.resourceFork
         self.type = envelope.type
         self.creator = envelope.creator
     }

@@ -86,12 +86,80 @@ struct FolderDownloadResumeIntegrationTests {
         serverConn.cancel()
     }
 
+    @Test("yielded items expose the per-item MACR resource fork bytes")
+    func resourceForkSurfaced() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let acceptedConnection = server.acceptNextConnection()
+
+        let clientQueue = DispatchQueue(label: "test.transfer.client.rsrc")
+        let clientConnection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: NWEndpoint.Port(rawValue: server.port)!,
+            using: .tcp
+        )
+        try await clientConnection.startAndWaitForReady(on: clientQueue)
+        let serverConn = try await acceptedConnection
+
+        let actor = FileTransferActor(
+            connection: clientConnection,
+            queue: clientQueue,
+            transferID: 1,
+            totalSize: 0
+        )
+
+        let dataFork = Data([0x01, 0x02, 0x03, 0x04])
+        let resourceFork = Data((0..<64).map { UInt8(($0 * 3 + 7) & 0xFF) })
+
+        async let serverWork: Void = playFolderTape(
+            on: serverConn,
+            files: [
+                .init(
+                    name: "icon.icns",
+                    data: dataFork,
+                    expectedAction: .download,
+                    resourceFork: resourceFork
+                )
+            ]
+        )
+
+        let (stream, continuation) = AsyncThrowingStream<FolderDownloadItem, Error>.makeStream()
+        async let driveDone: Void = FolderDownloadDecoder.drive(
+            actor: actor,
+            encoding: .macOSRoman,
+            resumeProvider: nil,
+            continuation: continuation
+        )
+
+        var items: [FolderDownloadItem] = []
+        let collector = Task {
+            for try await item in stream {
+                items.append(item)
+            }
+            return items
+        }
+
+        await driveDone
+        continuation.finish()
+        try await serverWork
+        let collected = try await collector.value
+
+        #expect(collected.count == 1)
+        #expect(collected[0].data == dataFork)
+        #expect(collected[0].resourceFork == resourceFork)
+
+        await actor.cancel()
+        serverConn.cancel()
+    }
+
     // MARK: - Tape helpers
 
     private struct TapeFile {
         let name: String
         let data: Data
         let expectedAction: ExpectedAction
+        var resourceFork: Data = Data()
     }
 
     private enum ExpectedAction {
@@ -109,7 +177,12 @@ struct FolderDownloadResumeIntegrationTests {
         for file in files {
             try await sendItemHeader(connection, name: file.name)
             try await expectActionAck(connection, expected: file.expectedAction)
-            try await sendFileBody(connection, name: file.name, data: file.data)
+            try await sendFileBody(
+                connection,
+                name: file.name,
+                data: file.data,
+                resourceFork: file.resourceFork
+            )
         }
         var end = Data()
         end.appendBigEndian(UInt16(0))
@@ -152,7 +225,8 @@ struct FolderDownloadResumeIntegrationTests {
     private func sendFileBody(
         _ connection: NWConnection,
         name: String,
-        data: Data
+        data: Data,
+        resourceFork: Data = Data()
     ) async throws {
         let info = buildInfoBlock(name: name)
         var filp = Data()
@@ -168,7 +242,7 @@ struct FolderDownloadResumeIntegrationTests {
         var macrHeader = Data()
         macrHeader.append(contentsOf: [0x4D, 0x41, 0x43, 0x52])  // "MACR"
         macrHeader.append(Data(repeating: 0, count: 8))
-        macrHeader.appendBigEndian(UInt32(0))                    // empty resource fork
+        macrHeader.appendBigEndian(UInt32(resourceFork.count))   // resource fork length
 
         var body = Data()
         body.appendBigEndian(UInt32(data.count))   // itemFileSize (informational)
@@ -177,6 +251,7 @@ struct FolderDownloadResumeIntegrationTests {
         body.append(dataHeader)
         body.append(data)
         body.append(macrHeader)
+        body.append(resourceFork)
         try await connection.sendAsync(body)
     }
 

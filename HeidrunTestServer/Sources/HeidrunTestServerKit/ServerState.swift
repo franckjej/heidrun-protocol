@@ -75,17 +75,23 @@ public actor ServerState {
         public var clientVersion: UInt16
         public var remoteHost: String
         public var loginAt: Date
+        /// `true` when the client advertised the Heidrun
+        /// `resourceForkSupport` extension on TX 107. Drives whether
+        /// single-file downloads ship the FILP envelope.
+        public var supportsResourceForks: Bool
 
         public init(
             login: String,
             clientVersion: UInt16,
             remoteHost: String,
-            loginAt: Date
+            loginAt: Date,
+            supportsResourceForks: Bool = false
         ) {
             self.login = login
             self.clientVersion = clientVersion
             self.remoteHost = remoteHost
             self.loginAt = loginAt
+            self.supportsResourceForks = supportsResourceForks
         }
     }
 

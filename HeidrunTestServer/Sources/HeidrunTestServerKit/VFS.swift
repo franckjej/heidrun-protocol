@@ -4,6 +4,7 @@ import HeidrunCore
 /// In-memory file metadata for the test server.
 public struct VFSFile: Sendable {
     public var data = Data()
+    public var resourceFork = Data()
     public var type: HeidrunCore.FourCharCode = .file
     public var creator: HeidrunCore.FourCharCode = .unknown
     public var created = Date()
@@ -12,6 +13,7 @@ public struct VFSFile: Sendable {
 
     public init(
         data: Data = Data(),
+        resourceFork: Data = Data(),
         type: HeidrunCore.FourCharCode = .file,
         creator: HeidrunCore.FourCharCode = .unknown,
         created: Date = Date(),
@@ -19,6 +21,7 @@ public struct VFSFile: Sendable {
         comment: String = ""
     ) {
         self.data = data
+        self.resourceFork = resourceFork
         self.type = type
         self.creator = creator
         self.created = created
@@ -164,12 +167,22 @@ public final class VFS: @unchecked Sendable {
         return file.data
     }
 
+    /// Resource-fork bytes for a file at `path/name`. Returns an empty
+    /// `Data` for files with no resource fork and for entries that
+    /// aren't files (folders, missing).
+    public func resourceFork(at path: [String], name: String) -> Data {
+        guard let parent = folder(at: path) else { return Data() }
+        guard case .file(let file) = parent.children[name] else { return Data() }
+        return file.resourceFork
+    }
+
     /// Insert (or replace) a file with the given data and metadata.
     @discardableResult
     public func putFile(
         at path: [String],
         name: String,
         data: Data,
+        resourceFork: Data = Data(),
         type: HeidrunCore.FourCharCode = .file,
         creator: HeidrunCore.FourCharCode = .unknown,
         created: Date = Date(),
@@ -178,6 +191,7 @@ public final class VFS: @unchecked Sendable {
         guard let parent = folder(at: path) else { return false }
         let f = VFSFile(
             data: data,
+            resourceFork: resourceFork,
             type: type,
             creator: creator,
             created: created,
@@ -206,7 +220,20 @@ public final class VFS: @unchecked Sendable {
 
 /// Side-channel transfer the control channel has authorised but the HTXF
 /// listener hasn't seen yet. `transferID` is the key callers look up.
+///
+/// `framed` on the download case is the negotiated state at TX 202 time —
+/// the client advertised `resourceForkSupport`, the server echoed it on
+/// login, and now the download must ship FILP/INFO/DATA/MACR + the
+/// resource fork instead of raw data-fork bytes. The resource fork is
+/// snapshotted alongside so the side-channel handler has everything it
+/// needs without re-touching the VFS.
 public enum PendingTransfer: Sendable {
-    case download(path: [String], name: String, dataForkOffset: UInt32)
+    case download(
+        path: [String],
+        name: String,
+        dataForkOffset: UInt32,
+        framed: Bool,
+        resourceFork: Data
+    )
     case upload(path: [String], name: String, size: UInt32, resume: Bool)
 }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Builds the byte stream for one Hotline file upload (single file, data
-/// fork only, no resource fork).
+/// Builds the byte stream for one Hotline file upload (single file, with
+/// optional resource fork).
 ///
 /// Layout, derived from `HETransferThread.m -startUploadWithPorts:`
 /// (lines ~925-970):
@@ -43,19 +43,25 @@ import Foundation
 /// MACR fork header (16 bytes, same shape):
 ///   [0..3]    "MACR"
 ///   [4..11]   8 bytes reserved
-///   [12..15]  UInt32 resourceLength (0 for the data-fork-only path)
+///   [12..15]  UInt32 resourceLength
+///   resourceLength bytes of resource fork follow
 /// ```
 public enum UploadFraming {
 
     /// Total bytes the side channel will carry after the 16-byte HTXF
     /// handshake (which is sent separately).
-    public static func totalSize(nameLength: Int, dataLength: UInt32) -> UInt32 {
+    public static func totalSize(
+        nameLength: Int,
+        dataLength: UInt32,
+        resourceLength: UInt32 = 0
+    ) -> UInt32 {
         let info = UInt32(74 + nameLength)
-        return 40 + info + 16 + dataLength + 16   // + resourceLength (0)
+        return 40 + info + 16 + dataLength + 16 + resourceLength
     }
 
-    /// Build the FILP + INFO + DATA-header + DATA + MACR-header bytes.
-    /// Resource fork is always empty in this path.
+    /// Build the FILP + INFO + DATA-header + DATA + MACR-header + (optional)
+    /// resource-fork bytes. Pass an empty `resourceFork` for data-fork-only
+    /// uploads.
     public static func encode(
         fileName: String,
         type: FourCharCode,
@@ -63,6 +69,7 @@ public enum UploadFraming {
         creationDate: Date,
         modificationDate: Date,
         data: Data,
+        resourceFork: Data = Data(),
         encoding: String.Encoding = .macOSRoman
     ) -> Data {
         var out = encodePrefix(
@@ -75,7 +82,7 @@ public enum UploadFraming {
             encoding: encoding
         )
         out.append(data)
-        out.append(encodeSuffix())
+        out.append(encodeSuffix(resourceFork: resourceFork))
         return out
     }
 
@@ -134,14 +141,18 @@ public enum UploadFraming {
         return out
     }
 
-    /// The MACR trailer (16 bytes: "MACR" magic, 8 reserved zeros, 4-byte
-    /// resource-fork length of 0). Send this after the data fork bytes
-    /// to complete the upload.
-    public static func encodeSuffix() -> Data {
+    /// The MACR trailer plus optional resource-fork bytes. The trailer is
+    /// 16 bytes (`MACR` magic + 8 reserved zeros + UInt32 length) followed
+    /// by `resourceFork.count` bytes of fork content. For a data-fork-only
+    /// upload pass an empty `resourceFork` — the trailer alone is 16 bytes
+    /// and the length field reads zero, matching the historical wire
+    /// behaviour.
+    public static func encodeSuffix(resourceFork: Data = Data()) -> Data {
         var out = Data()
         out.append(contentsOf: [0x4D, 0x41, 0x43, 0x52])      // "MACR"
         out.append(Data(repeating: 0, count: 8))              // reserved
-        out.appendBigEndian(UInt32(0))                        // resource length
+        out.appendBigEndian(UInt32(resourceFork.count))       // resource length
+        out.append(resourceFork)
         return out
     }
 

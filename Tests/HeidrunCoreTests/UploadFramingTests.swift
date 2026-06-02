@@ -85,6 +85,65 @@ struct UploadFramingTests {
         #expect(payload.count == Int(expected))
     }
 
+    @Test("totalSize and encoded payload include the resource fork length")
+    func totalSizeWithResourceFork() {
+        // 1-byte name, 0-byte data, 4-byte resource fork.
+        // Total = 40 + 75 + 16 + 0 + 16 + 4 = 151.
+        #expect(UploadFraming.totalSize(nameLength: 1, dataLength: 0, resourceLength: 4) == 151)
+
+        let payload = UploadFraming.encode(
+            fileName: "x",
+            type: "TEXT",
+            creator: "ttxt",
+            creationDate: Date(timeIntervalSince1970: 0),
+            modificationDate: Date(timeIntervalSince1970: 0),
+            data: Data(),
+            resourceFork: Data([0xDE, 0xAD, 0xBE, 0xEF])
+        )
+        #expect(payload.count == 151)
+
+        // The MACR header is 16 bytes from the end of the data fork; the
+        // resource bytes are the trailing four bytes.
+        #expect(Array(payload.suffix(4)) == [0xDE, 0xAD, 0xBE, 0xEF])
+        // The 4 bytes preceding the resource fork are the MACR length field
+        // (big-endian UInt32 = 4).
+        let lengthRange = (payload.count - 8)..<(payload.count - 4)
+        #expect(Array(payload[lengthRange]) == [0x00, 0x00, 0x00, 0x04])
+    }
+
+    @Test("prefix + data + suffix(resourceFork:) reassemble the monolithic encoding")
+    func chunkedPiecesWithResourceFork() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let data = Data((0..<128).map { UInt8($0 & 0xFF) })
+        let rsrc = Data((0..<32).map { UInt8(($0 * 5) & 0xFF) })
+
+        let monolithic = UploadFraming.encode(
+            fileName: "split.bin",
+            type: .file,
+            creator: .unknown,
+            creationDate: date,
+            modificationDate: date,
+            data: data,
+            resourceFork: rsrc
+        )
+        let prefix = UploadFraming.encodePrefix(
+            fileName: "split.bin",
+            type: .file,
+            creator: .unknown,
+            creationDate: date,
+            modificationDate: date,
+            dataLength: UInt32(data.count)
+        )
+        let suffix = UploadFraming.encodeSuffix(resourceFork: rsrc)
+
+        var assembled = Data()
+        assembled.append(prefix)
+        assembled.append(data)
+        assembled.append(suffix)
+        #expect(assembled == monolithic)
+        #expect(suffix.count == 16 + rsrc.count)
+    }
+
     @Test("prefix + data + suffix reassemble the monolithic encoding")
     func chunkedPiecesMatchMonolithic() {
         let date = Date(timeIntervalSince1970: 1_700_000_000)

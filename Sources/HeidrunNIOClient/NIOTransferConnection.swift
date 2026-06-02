@@ -84,9 +84,15 @@ enum NIOTransferConnection {
     /// Stream a local file at `source` to `host:transferPort` as a
     /// Hotline upload. Builds the FILP / INFO / DATA-hdr prefix from
     /// the supplied metadata, streams the data fork in chunks from
-    /// disk, then sends the MACR trailer. `totalBytes` is computed
-    /// via `UploadFraming.totalSize` and passed in the HTXF preamble
-    /// so the server knows when to stop reading.
+    /// disk, then sends the MACR trailer plus any resource-fork bytes.
+    /// `totalBytes` is computed via `UploadFraming.totalSize` and
+    /// passed in the HTXF preamble so the server knows when to stop
+    /// reading.
+    ///
+    /// `resourceFork` is passed by value rather than read from disk —
+    /// resource forks are typically small (<<1 MB) so loading them up
+    /// front avoids a second `FileHandle` and keeps the streaming path
+    /// honest about how many bytes it owes the server.
     ///
     /// `creationDate` / `modificationDate` are sourced from the file's
     /// own attributes by the caller — passing them in (rather than
@@ -103,12 +109,15 @@ enum NIOTransferConnection {
         creator: HeidrunCore.FourCharCode,
         creationDate: Date,
         modificationDate: Date,
+        resourceFork: Data = Data(),
         encoding: String.Encoding = .macOSRoman,
         progress: (@Sendable (UInt64, UInt64) async -> Void)?
     ) async throws {
         let nameBytes = fileName.data(using: encoding, allowLossyConversion: true) ?? Data()
         let totalSize = UploadFraming.totalSize(
-            nameLength: nameBytes.count, dataLength: fileSize
+            nameLength: nameBytes.count,
+            dataLength: fileSize,
+            resourceLength: UInt32(resourceFork.count)
         )
         let prefix = UploadFraming.encodePrefix(
             fileName: fileName,
@@ -117,7 +126,7 @@ enum NIOTransferConnection {
             dataLength: fileSize,
             encoding: encoding
         )
-        let suffix = UploadFraming.encodeSuffix()
+        let suffix = UploadFraming.encodeSuffix(resourceFork: resourceFork)
 
         // Inbound bytes on an upload aren't read by us — the server
         // never replies on this side channel; the control channel

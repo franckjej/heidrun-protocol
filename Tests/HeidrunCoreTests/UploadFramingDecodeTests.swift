@@ -25,6 +25,26 @@ struct UploadFramingDecodeTests {
         #expect(envelope.resourceFork.isEmpty)
     }
 
+    @Test("round-trips an upload that carries a resource fork")
+    func roundTripsResourceFork() throws {
+        let dataFork = Data("Hello, Hotline.".utf8)
+        let resourceFork = Data((0..<256).map { UInt8(($0 ^ 0xA5) & 0xFF) })
+        let payload = UploadFraming.encode(
+            fileName: "greeting.txt",
+            type: "TEXT",
+            creator: "ttxt",
+            creationDate: Date(),
+            modificationDate: Date(),
+            data: dataFork,
+            resourceFork: resourceFork
+        )
+
+        let envelope = try UploadFraming.decode(payload)
+        #expect(envelope.fileName == "greeting.txt")
+        #expect(envelope.data == dataFork)
+        #expect(envelope.resourceFork == resourceFork)
+    }
+
     @Test("throws DecodeError.truncated on short payload")
     func rejectsTruncated() {
         let truncated = Data([0x46, 0x49, 0x4C, 0x50])     // just "FILP", nothing after
