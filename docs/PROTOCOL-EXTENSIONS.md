@@ -50,7 +50,7 @@ naturally). This is what makes the extensions safe to send to any peer.
 |-----------|-------------|-------------|------------------|
 | `0xE000`  | `userEmoji` | UTF-8 string | protocol rc7 / server rc5 |
 | `0xE001`  | `errorKind` | `UInt16`    | protocol rc12 |
-| `0xE002`  | `resourceForkSupport` | `UInt8` (= 1) | TBD |
+| `0xE002`  | `resourceForkSupport` | `UInt8` (= 1) | protocol rc14 / server tbd (2026-06) |
 
 ---
 
@@ -241,7 +241,7 @@ gated on the negotiation.
 | Extension   | Introduced |
 |-------------|------------|
 | `0xE000` field band, `userEmoji` | `heidrun-protocol` **v1.0.0-rc7**, `heidrun-server` **v1.0.0-rc5** (2026-05) |
-| `0xE002` `resourceForkSupport`   | `heidrun-protocol` **v1.0.0-rc14**, `heidrun-server` **TBD** |
+| `0xE002` `resourceForkSupport`   | `heidrun-protocol` **v1.0.0-rc14** (2026-06), `heidrun-server` next rc |
 
 When adding a new extension: append a field key in the `0xE000` band, document
 it here with its wire layout, keep it additive (omittable / trailing), and make
