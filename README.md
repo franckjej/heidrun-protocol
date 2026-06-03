@@ -1,3 +1,11 @@
+<pre align="center">
+   __         _     __               
+  / /_  ___  (_)___/ /______  ______ 
+ / __ \/ _ \/ / __  / ___/ / / / __ \
+/ / / /  __/ / /_/ / /  / /_/ / / / /
+\/ /_/\___/_/\__,_/_/   \__,_/_/ /_/ 
+</pre>
+
 # heidrun-protocol
 
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](https://swift.org)
