@@ -22,6 +22,28 @@ extension NWConnection {
         }
     }
 
+    /// Send `data` (possibly empty) as the final write on the connection
+    /// and trigger a graceful half-close. `NWConnection.cancel()` is the
+    /// abort path — it discards anything still queued in the framework's
+    /// send pipeline — so a successful upload must NOT end with `cancel`.
+    /// `isComplete: true` here flushes preceding sends and writes a TCP
+    /// FIN so the peer reads EOF instead of a truncation.
+    public func sendFinalAsync(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            self.send(
+                content: data.isEmpty ? nil : data,
+                isComplete: true,
+                completion: .contentProcessed { error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else {
+                        cont.resume()
+                    }
+                }
+            )
+        }
+    }
+
     /// Read exactly `count` bytes. Throws when the connection ends before
     /// the buffer fills. Avoids the `NWConnection.receive(min:max:)` quirk
     /// where `min == max` can still deliver fewer bytes if the stream

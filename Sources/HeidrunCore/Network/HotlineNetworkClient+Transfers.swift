@@ -164,8 +164,9 @@ extension HotlineNetworkClient {
             if let progress { await progress(sent) }
         }
 
-        try await actor.sendBytes(UploadFraming.encodeSuffix(resourceFork: resourceFork))
-        await actor.finishUpload()
+        // Fold the MACR trailer + resource fork into the closing FIN so
+        // the kernel drains everything before the connection tears down.
+        try await actor.finishUpload(UploadFraming.encodeSuffix(resourceFork: resourceFork))
         activeTransfers.removeValue(forKey: handle.transferID)
     }
 
@@ -294,7 +295,7 @@ extension HotlineNetworkClient {
             await progress?(cumulativeBytes)
         }
 
-        await actor.finishUpload()
+        try await actor.finishUpload()
         activeTransfers.removeValue(forKey: handle.transferID)
     }
 

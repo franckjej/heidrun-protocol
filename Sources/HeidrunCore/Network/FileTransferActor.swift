@@ -54,12 +54,20 @@ public actor FileTransferActor {
         try await connection.sendAsync(data)
     }
 
-    /// Mark the transfer as complete from the sender side and tear down
-    /// the connection.
-    public func finishUpload() {
-        guard !torn else { return }
+    /// Mark the transfer as complete from the sender side. Sends `data`
+    /// (typically the trailing MACR + resource fork) as the final write,
+    /// piggy-backing a TCP FIN so the kernel drains the send queue before
+    /// the connection closes. Pass an empty `data` for paths that have
+    /// already sent every byte (e.g. folder-upload finalize).
+    ///
+    /// Do not call `connection.cancel()` on a successful upload —
+    /// `cancel` is `NWConnection`'s abort path and discards anything
+    /// still queued in the framework. That used to truncate large MACR
+    /// trailers carrying real resource forks.
+    public func finishUpload(_ data: Data = Data()) async throws {
+        guard !torn else { throw HotlineError.cancelled }
         torn = true
-        connection.cancel()
+        try await connection.sendFinalAsync(data)
     }
 
     /// Read exactly `count` bytes from the side channel. Used for the
