@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a bug in heidrun-protocol (HeidrunCore, HeidrunNIOClient, or the heidrun CLI)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report. Please fill in the details below so the
+        issue can be reproduced. For security vulnerabilities, do **not** use
+        this form — see the security policy linked on the new-issue page.
+  - type: dropdown
+    id: product
+    attributes:
+      label: Affected product
+      options:
+        - HeidrunCore
+        - HeidrunNIOClient
+        - heidrun (CLI)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / tag
+      description: The tag you depend on, or the commit you built from.
+      placeholder: "1.0.0-rc15"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: swift
+    attributes:
+      label: Swift toolchain version
+      description: Output of `swift --version`.
+      placeholder: "Swift 6.3.2"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal code snippet or sequence that triggers the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behaviour
+      description: What did you expect, and what happened instead? Include any error output.
+      render: text
+    validations:
+      required: true
