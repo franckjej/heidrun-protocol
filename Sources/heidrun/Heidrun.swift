@@ -482,10 +482,22 @@ struct Heidrun: AsyncParsableCommand {
             "→ connected (server v\(info.serverVersion), socket \(info.connectionSocket))\n".utf8
         ))
 
+        // Roster on connect: show who's already here. Best-effort — some
+        // servers gate the user list behind the agreement the printer
+        // task auto-accepts a beat later, so a failure just yields an
+        // empty list rather than aborting the session. Doubles as the
+        // seed for the enter/leave tracker so existing users aren't
+        // announced as fresh arrivals on the next push.
+        let initialRoster = (try? await client.fetchUserList()) ?? []
+        if !initialRoster.isEmpty {
+            printUsers(initialRoster)
+        }
+
         let eventStream = client.events
         let capturedNick = nickname
         let capturedIcon = icon
         let printerTask = Task {
+            var knownSockets = Set(initialRoster.map(\.socket))
             // Many servers gate chat behind an agreement push (TX 109).
             // Auto-accept here matches every GUI client's behaviour.
             for await event in eventStream {
@@ -494,7 +506,7 @@ struct Heidrun: AsyncParsableCommand {
                         nickname: capturedNick, icon: capturedIcon, emoji: nil
                     )
                 }
-                printEvent(event)
+                printEvent(event, knownSockets: &knownSockets)
             }
             // Stream ended → connection died. The supervisor task is
             // awaiting `printerTask.value` and will start a reconnect
@@ -1168,7 +1180,20 @@ struct Heidrun: AsyncParsableCommand {
         FileHandle.standardOutput.write(Data(text.utf8))
     }
 
-    private func printEvent(_ event: HotlineEvent) {
+    /// `HH:mm:ss` clock for stamping enter/leave notifications. Static +
+    /// cached: a fresh `DateFormatter` per event is wasteful and these
+    /// fire from the printer task.
+    private static let eventClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// `knownSockets` tracks who we've already seen so a `.userChanged`
+    /// push reads as "entered" for a genuinely new socket and "updated"
+    /// for an away/nick change on someone already present.
+    private func printEvent(_ event: HotlineEvent, knownSockets: inout Set<UInt16>) {
         switch event {
         case .chatReceived(_, let message, let isAction):
             let prefix = isAction ? "* " : ""
@@ -1176,9 +1201,13 @@ struct Heidrun: AsyncParsableCommand {
         case .messageReceived(let from, let message):
             FileHandle.standardOutput.write(Data("[pm \(from)] \(normalizeLineEndings(message))\n".utf8))
         case .userChanged(let user):
-            FileHandle.standardError.write(Data("→ \(user.nickname) (\(user.socket)) updated\n".utf8))
+            let stamp = Self.eventClock.string(from: Date())
+            let verb = knownSockets.insert(user.socket).inserted ? "entered" : "updated"
+            FileHandle.standardError.write(Data("\(stamp)  → \(user.nickname) (\(user.socket)) \(verb)\n".utf8))
         case .userLeft(let socket):
-            FileHandle.standardError.write(Data("→ socket \(socket) left\n".utf8))
+            let stamp = Self.eventClock.string(from: Date())
+            knownSockets.remove(socket)
+            FileHandle.standardError.write(Data("\(stamp)  → socket \(socket) left\n".utf8))
         case .broadcastReceived(let message):
             FileHandle.standardOutput.write(Data("[broadcast] \(normalizeLineEndings(message))\n".utf8))
         case .agreementReceived(let text, _):
