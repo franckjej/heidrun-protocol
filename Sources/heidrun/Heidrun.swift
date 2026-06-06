@@ -38,8 +38,8 @@ struct Heidrun: AsyncParsableCommand {
     @Option(name: .long, help: "Scripting: download this remote file into the current directory, then exit (e.g. --download /files/gtest.bin).")
     var download: String?
 
-    @Option(name: .long, help: "Scripting: upload the local file of the same name to this remote path, then exit (e.g. --upload /files/gtest.bin).")
-    var upload: String?
+    @Option(name: .long, parsing: .upToNextOption, help: "Scripting: upload a local file to a remote directory, then exit. Usage: --upload <localpath> [<remotedir>].")
+    var upload: [String] = []
 
     func run() async throws {
         let (host, port) = parseAddress(server)
@@ -55,7 +55,7 @@ struct Heidrun: AsyncParsableCommand {
 
         // Scripting one-shot: --download / --upload perform a single
         // transfer and exit, bypassing the interactive REPL.
-        if download != nil || upload != nil {
+        if download != nil || !upload.isEmpty {
             try await runOneShot(settings: settings)
             return
         }
@@ -555,13 +555,14 @@ struct Heidrun: AsyncParsableCommand {
 
     /// Non-interactive transfer for scripting. `--download <remote>`
     /// fetches the remote file into the current directory; `--upload
-    /// <remote>` pushes the local file of the same basename to that
-    /// remote path. Connects, transfers once, and returns — the process
-    /// exits 0. Failures throw, which ArgumentParser maps to a non-zero
-    /// exit so shell scripts can branch on `$?`. The remote argument is
-    /// resolved from the server root (a leading `/` is optional).
+    /// <localpath> [<remotedir>]` pushes a local file to a remote
+    /// directory (remote name = local basename; remote dir defaults to
+    /// the server root). Connects, transfers once, and returns — the
+    /// process exits 0. Failures throw, which ArgumentParser maps to a
+    /// non-zero exit so shell scripts can branch on `$?`. Remote paths
+    /// resolve from the server root (a leading `/` is optional).
     private func runOneShot(settings: ConnectionSettings) async throws {
-        guard download == nil || upload == nil else {
+        guard download == nil || upload.isEmpty else {
             throw ValidationError("Use only one of --download / --upload.")
         }
         FileHandle.standardError.write(Data("→ connecting to \(settings.address):\(settings.port)…\n".utf8))
@@ -573,16 +574,14 @@ struct Heidrun: AsyncParsableCommand {
         }
         let client = session.client
 
-        let target = (download ?? upload)!
-        let components = Self.resolveRemotePath(target, against: RemotePath()).components
-        guard let name = components.last, !name.isEmpty else {
-            throw ValidationError("expected a file path, e.g. /files/gtest.bin")
-        }
-        let parent = RemotePath(components: Array(components.dropLast()))
-        let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(name)
-
-        if download != nil {
+        if let remote = download {
+            let components = Self.resolveRemotePath(remote, against: RemotePath()).components
+            guard let name = components.last, !name.isEmpty else {
+                throw ValidationError("--download expects a file path, e.g. --download /files/gtest.bin")
+            }
+            let parent = RemotePath(components: Array(components.dropLast()))
+            let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent(name)
             FileHandle.standardError.write(Data(
                 "→ downloading /\(components.joined(separator: "/")) → \(local.path)\n".utf8
             ))
@@ -591,15 +590,23 @@ struct Heidrun: AsyncParsableCommand {
                 progress: transferProgress(verb: "↓")
             )
         } else {
+            guard let localArg = upload.first else {
+                throw ValidationError("--upload expects <localpath> [<remotedir>]")
+            }
+            let local = URL(fileURLWithPath: (localArg as NSString).expandingTildeInPath)
             guard FileManager.default.isReadableFile(atPath: local.path) else {
                 throw ValidationError("local file not readable: \(local.path)")
             }
+            let remoteDir = upload.count > 1
+                ? Self.resolveRemotePath(upload[1], against: RemotePath())
+                : RemotePath()
+            let name = local.lastPathComponent
             let (type, creator) = Self.hfsCodes(for: name)
             FileHandle.standardError.write(Data(
-                "→ uploading \(local.path) → /\(components.joined(separator: "/"))\n".utf8
+                "→ uploading \(local.path) → /\((remoteDir.components + [name]).joined(separator: "/"))\n".utf8
             ))
             try await client.uploadFile(
-                at: parent, name: name, from: local,
+                at: remoteDir, name: name, from: local,
                 type: type, creator: creator,
                 progress: transferProgress(verb: "↑")
             )
