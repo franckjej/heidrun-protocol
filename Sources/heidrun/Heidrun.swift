@@ -305,7 +305,7 @@ struct Heidrun: AsyncParsableCommand {
         let restOfLine = String(context.fullLine[argStart...])
         if context.fullLine.contains("|") { return .empty }
         switch cmd {
-        case "ls", "finfo", "get", "download", "cd":
+        case "ls", "finfo", "get", "download", "cd", "rm", "mkdir":
             // Single rest-of-line path arg. Use restOfLine as the
             // replace span so paths with internal spaces work.
             guard let client = await clientHolder.get() else { return .empty }
@@ -798,6 +798,49 @@ struct Heidrun: AsyncParsableCommand {
                 body: pieces[2]
             )
             FileHandle.standardError.write(Data("→ posted \"\(pieces[1])\" to /\(path.components.joined(separator: "/"))\n".utf8))
+        case "rm", "del", "delete":
+            // Delete a file or folder. `/rm <remote-path>` — resolved
+            // against the Hotline cwd unless absolute. No undo, no
+            // confirmation (this is a scripting-friendly client).
+            let components = Self.resolveRemotePath(argument, against: cwd).components
+            guard let name = components.last, !name.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /rm <remote/path/entry>\n".utf8))
+                return true
+            }
+            let parentPath = RemotePath(components: Array(components.dropLast()))
+            try await client.deleteEntry(at: parentPath, name: name)
+            FileHandle.standardError.write(Data("→ deleted /\(components.joined(separator: "/"))\n".utf8))
+        case "mkdir":
+            // Create a folder. `/mkdir <remote-path>` — the last
+            // component is the new folder name; the parent must exist.
+            let components = Self.resolveRemotePath(argument, against: cwd).components
+            guard let name = components.last, !name.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /mkdir <remote/path/folder>\n".utf8))
+                return true
+            }
+            let parentPath = RemotePath(components: Array(components.dropLast()))
+            try await client.createFolder(at: parentPath, name: name)
+            FileHandle.standardError.write(Data("→ created /\(components.joined(separator: "/"))\n".utf8))
+        case "mv", "move":
+            // Move an entry. `/mv <source-path> <dest-dir>` — the entry
+            // keeps its name; dest-dir is where it lands. Source name
+            // can't contain spaces (first token is the source path).
+            let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2 else {
+                FileHandle.standardError.write(Data("usage: /mv <source/path/entry> <dest/dir>\n".utf8))
+                return true
+            }
+            let srcComponents = Self.resolveRemotePath(String(parts[0]), against: cwd).components
+            guard let name = srcComponents.last, !name.isEmpty else {
+                FileHandle.standardError.write(Data("usage: /mv <source/path/entry> <dest/dir>\n".utf8))
+                return true
+            }
+            let srcParent = RemotePath(components: Array(srcComponents.dropLast()))
+            let destDir = Self.resolveRemotePath(String(parts[1]), against: cwd)
+            try await client.moveEntry(from: srcParent, name: name, to: destDir)
+            FileHandle.standardError.write(Data(
+                "→ moved \(name) → /\((destDir.components + [name]).joined(separator: "/"))\n".utf8
+            ))
         case "get", "download":
             // Download a file. `/get <remote-path>` — last path
             // component is the file name; the file is saved to the
@@ -912,6 +955,9 @@ struct Heidrun: AsyncParsableCommand {
           /get <path/file>       download a file to the CLI host's cwd
           /put <local-path> [<remote-dir>]
                                  upload a local file (remote-dir defaults to cwd)
+          /rm <path/entry>       delete a remote file or folder
+          /mkdir <path/folder>   create a remote folder
+          /mv <src> <dest-dir>   move a remote file or folder
           /news                  read the plain news feed
           /post <text>           append to the plain news feed
           /tnews [path]          threaded news: list bundles at <path>
@@ -1012,6 +1058,9 @@ struct Heidrun: AsyncParsableCommand {
         "help",
         "info",
         "ls",
+        "mkdir",
+        "mv",
+        "rm",
         "me",
         "msg",
         "news",
