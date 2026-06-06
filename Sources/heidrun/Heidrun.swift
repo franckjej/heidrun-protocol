@@ -35,6 +35,12 @@ struct Heidrun: AsyncParsableCommand {
     @Option(name: .long, help: "User icon ID (Hotline classic icon set). Default 25.")
     var icon: UInt16 = 25
 
+    @Option(name: .long, help: "Scripting: download this remote file into the current directory, then exit (e.g. --download /files/gtest.bin).")
+    var download: String?
+
+    @Option(name: .long, help: "Scripting: upload the local file of the same name to this remote path, then exit (e.g. --upload /files/gtest.bin).")
+    var upload: String?
+
     func run() async throws {
         let (host, port) = parseAddress(server)
         let settings = ConnectionSettings(
@@ -46,6 +52,13 @@ struct Heidrun: AsyncParsableCommand {
             icon: icon,
             useTLS: false
         )
+
+        // Scripting one-shot: --download / --upload perform a single
+        // transfer and exit, bypassing the interactive REPL.
+        if download != nil || upload != nil {
+            try await runOneShot(settings: settings)
+            return
+        }
 
         let editor = LineEditor(historyURL: Self.historyURL())
         // Live-client holder shared with the completion callback so
@@ -538,6 +551,60 @@ struct Heidrun: AsyncParsableCommand {
             }
         }
         throw lastError ?? HotlineError.cancelled
+    }
+
+    /// Non-interactive transfer for scripting. `--download <remote>`
+    /// fetches the remote file into the current directory; `--upload
+    /// <remote>` pushes the local file of the same basename to that
+    /// remote path. Connects, transfers once, and returns — the process
+    /// exits 0. Failures throw, which ArgumentParser maps to a non-zero
+    /// exit so shell scripts can branch on `$?`. The remote argument is
+    /// resolved from the server root (a leading `/` is optional).
+    private func runOneShot(settings: ConnectionSettings) async throws {
+        guard download == nil || upload == nil else {
+            throw ValidationError("Use only one of --download / --upload.")
+        }
+        FileHandle.standardError.write(Data("→ connecting to \(settings.address):\(settings.port)…\n".utf8))
+        let session = try await establishSession(settings: settings)
+        defer {
+            session.printerTask.cancel()
+            let liveClient = session.client
+            Task { await liveClient.disconnect() }
+        }
+        let client = session.client
+
+        let target = (download ?? upload)!
+        let components = Self.resolveRemotePath(target, against: RemotePath()).components
+        guard let name = components.last, !name.isEmpty else {
+            throw ValidationError("expected a file path, e.g. /files/gtest.bin")
+        }
+        let parent = RemotePath(components: Array(components.dropLast()))
+        let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(name)
+
+        if download != nil {
+            FileHandle.standardError.write(Data(
+                "→ downloading /\(components.joined(separator: "/")) → \(local.path)\n".utf8
+            ))
+            try await client.downloadFile(
+                at: parent, name: name, to: local,
+                progress: transferProgress(verb: "↓")
+            )
+        } else {
+            guard FileManager.default.isReadableFile(atPath: local.path) else {
+                throw ValidationError("local file not readable: \(local.path)")
+            }
+            let (type, creator) = Self.hfsCodes(for: name)
+            FileHandle.standardError.write(Data(
+                "→ uploading \(local.path) → /\(components.joined(separator: "/"))\n".utf8
+            ))
+            try await client.uploadFile(
+                at: parent, name: name, from: local,
+                type: type, creator: creator,
+                progress: transferProgress(verb: "↑")
+            )
+        }
+        FileHandle.standardError.write(Data("→ done.\n".utf8))
     }
 
     /// Per-user shell-history file. Lives next to the user's classic
