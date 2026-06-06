@@ -285,6 +285,80 @@ struct NIOHotlineClientIntegrationTests {
         await client.disconnect()
     }
 
+    @Test("deleteEntry sends TX 204 with the name + path")
+    func deleteEntryRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let delPacket = try await conn.readPacket()
+            #expect(delPacket.header.transactionID == 204)
+            #expect(delPacket.fields.string(.fileName) == "junk.txt")
+            #expect(delPacket.fields.first(.filePath) != nil)
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        try await client.deleteEntry(at: RemotePath(components: ["Software"]), name: "junk.txt")
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("createFolder sends TX 205 with the name + path")
+    func createFolderRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let mkPacket = try await conn.readPacket()
+            #expect(mkPacket.header.transactionID == 205)
+            #expect(mkPacket.fields.string(.fileName) == "New Folder")
+            #expect(mkPacket.fields.first(.filePath) != nil)
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        try await client.createFolder(at: RemotePath(components: ["Software"]), name: "New Folder")
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("moveEntry sends TX 208 with name + source path + destination path")
+    func moveEntryRoundTrip() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let mvPacket = try await conn.readPacket()
+            #expect(mvPacket.header.transactionID == 208)
+            #expect(mvPacket.fields.string(.fileName) == "report.pdf")
+            #expect(mvPacket.fields.first(.filePath) != nil)
+            #expect(mvPacket.fields.first(.destinationPath) != nil)
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Tester", icon: 1, emoji: nil)
+        try await client.moveEntry(
+            from: RemotePath(components: ["Inbox"]),
+            name: "report.pdf",
+            to: RemotePath(components: ["Archive", "2026"])
+        )
+        try await serverSide
+        await client.disconnect()
+    }
+
     @Test("fetchNewsBundles sends TX 370 with newsPath and decodes the entries")
     func fetchNewsBundlesRoundTrip() async throws {
         let server = try await LoopbackServer.start()

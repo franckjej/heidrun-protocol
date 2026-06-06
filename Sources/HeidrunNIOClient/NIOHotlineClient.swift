@@ -235,6 +235,53 @@ public actor NIOHotlineClient {
         )
     }
 
+    /// Delete a file or (recursively) a folder at `(path, name)`. TX 204,
+    /// no-reply, `[fileName(201), filePath(202)]`. Mirrors
+    /// `HotlineNetworkClient.deleteEntry`.
+    public func deleteEntry(at path: RemotePath, name: String) async throws {
+        try await send(
+            transactionID: 204,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: false
+        )
+    }
+
+    /// Create a folder named `name` inside `path`. TX 205, no-reply,
+    /// `[fileName(201), filePath(202)]`. Mirrors
+    /// `HotlineNetworkClient.createFolder`.
+    public func createFolder(at path: RemotePath, name: String) async throws {
+        try await send(
+            transactionID: 205,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, path, encoding: stringEncoding)
+            ],
+            expectsReply: false
+        )
+    }
+
+    /// Move `name` from `sourcePath` into `destinationPath`. TX 208,
+    /// no-reply, `[fileName(201), filePath(202), destinationPath(212)]`.
+    /// Mirrors `HotlineNetworkClient.moveEntry`.
+    public func moveEntry(
+        from sourcePath: RemotePath,
+        name: String,
+        to destinationPath: RemotePath
+    ) async throws {
+        try await send(
+            transactionID: 208,
+            fields: [
+                .string(.fileName, name, encoding: stringEncoding),
+                .path(.filePath, sourcePath, encoding: stringEncoding),
+                .path(.destinationPath, destinationPath, encoding: stringEncoding)
+            ],
+            expectsReply: false
+        )
+    }
+
     /// Big-endian 4-byte → `FourCharCode`. Mirrors the private helper
     /// on `HotlineNetworkClient`. Pads with NUL when the field is
     /// short (some servers send fewer bytes for `.unknown` creators).
