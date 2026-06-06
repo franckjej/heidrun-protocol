@@ -297,6 +297,7 @@ struct NIOHotlineClientIntegrationTests {
             #expect(delPacket.header.transactionID == 204)
             #expect(delPacket.fields.string(.fileName) == "junk.txt")
             #expect(delPacket.fields.first(.filePath) != nil)
+            try await conn.sendReply(transactionID: 204, taskNumber: delPacket.header.taskNumber)
         }()
 
         let client = try await NIOHotlineClient.connect(
@@ -320,6 +321,7 @@ struct NIOHotlineClientIntegrationTests {
             #expect(mkPacket.header.transactionID == 205)
             #expect(mkPacket.fields.string(.fileName) == "New Folder")
             #expect(mkPacket.fields.first(.filePath) != nil)
+            try await conn.sendReply(transactionID: 205, taskNumber: mkPacket.header.taskNumber)
         }()
 
         let client = try await NIOHotlineClient.connect(
@@ -344,6 +346,7 @@ struct NIOHotlineClientIntegrationTests {
             #expect(mvPacket.fields.string(.fileName) == "report.pdf")
             #expect(mvPacket.fields.first(.filePath) != nil)
             #expect(mvPacket.fields.first(.destinationPath) != nil)
+            try await conn.sendReply(transactionID: 208, taskNumber: mvPacket.header.taskNumber)
         }()
 
         let client = try await NIOHotlineClient.connect(

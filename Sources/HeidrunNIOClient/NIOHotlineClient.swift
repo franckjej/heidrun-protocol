@@ -245,12 +245,13 @@ public actor NIOHotlineClient {
                 .string(.fileName, name, encoding: stringEncoding),
                 .path(.filePath, path, encoding: stringEncoding)
             ],
-            expectsReply: false
+            expectsReply: true
         )
     }
 
-    /// Create a folder named `name` inside `path`. TX 205, no-reply,
-    /// `[fileName(201), filePath(202)]`. Mirrors
+    /// Create a folder named `name` inside `path`. TX 205,
+    /// `[fileName(201), filePath(202)]`. Awaits the reply so a
+    /// permission-denied / failure throws. Mirrors
     /// `HotlineNetworkClient.createFolder`.
     public func createFolder(at path: RemotePath, name: String) async throws {
         try await send(
@@ -259,7 +260,7 @@ public actor NIOHotlineClient {
                 .string(.fileName, name, encoding: stringEncoding),
                 .path(.filePath, path, encoding: stringEncoding)
             ],
-            expectsReply: false
+            expectsReply: true
         )
     }
 
@@ -278,7 +279,7 @@ public actor NIOHotlineClient {
                 .path(.filePath, sourcePath, encoding: stringEncoding),
                 .path(.destinationPath, destinationPath, encoding: stringEncoding)
             ],
-            expectsReply: false
+            expectsReply: true
         )
     }
 

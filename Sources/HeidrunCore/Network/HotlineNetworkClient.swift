@@ -534,8 +534,10 @@ public actor HotlineNetworkClient: HotlineClient {
     }
 
     public func deleteEntry(at path: RemotePath, name: String) async throws {
-        // transID 204, no-reply, [name(201), filePath(202)].
-        try await sendNoReply(
+        // transID 204, [name(201), filePath(202)]. Awaits the reply so a
+        // server-side rejection (e.g. permission denied) throws instead of
+        // silently no-op'ing.
+        try await sendExpectingReply(
             transactionID: 204,
             fields: [
                 .string(.fileName, name, encoding: stringEncoding),
@@ -545,8 +547,9 @@ public actor HotlineNetworkClient: HotlineClient {
     }
 
     public func createFolder(at path: RemotePath, name: String) async throws {
-        // transID 205, no-reply, [name(201), filePath(202)].
-        try await sendNoReply(
+        // transID 205, [name(201), filePath(202)]. Awaits the reply so a
+        // permission-denied / failure throws instead of silently failing.
+        try await sendExpectingReply(
             transactionID: 205,
             fields: [
                 .string(.fileName, name, encoding: stringEncoding),
@@ -616,8 +619,9 @@ public actor HotlineNetworkClient: HotlineClient {
         name: String,
         to destinationPath: RemotePath
     ) async throws {
-        // transID 208, no-reply, [name(201), filePath(202), destPath(212)].
-        try await sendNoReply(
+        // transID 208, [name(201), filePath(202), destPath(212)]. Awaits
+        // the reply so a permission-denied / failure throws.
+        try await sendExpectingReply(
             transactionID: 208,
             fields: [
                 .string(.fileName, name, encoding: stringEncoding),
