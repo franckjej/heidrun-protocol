@@ -1,9 +1,20 @@
-/// Per-user permission bitmask carried in `User.privileges`.
+/// Per-user permission bitmask carried in `User.privileges` and on the wire
+/// as the 8-byte Hotline "User Access" bitmap (field 110).
 ///
-/// On the wire the original `hotUserPrivs` struct is exactly 8 bytes, with
-/// each privilege occupying one bit. Bit 0 of byte 0 in the original C
-/// struct is `deleteFiles`, bit 1 is `uploadFiles`, and so on. The bit
-/// numbering here matches that layout so packets round-trip cleanly.
+/// Bit numbers here are the canonical privilege numbers: bit 0 =
+/// `deleteFiles`, bit 1 = `uploadFiles`, … The *wire* byte order is
+/// **MSB-first within each byte** (privilege N = bit `7 - N%8` of byte
+/// `N/8`) — see `bytes` / `init(bytes:)`.
+///
+/// Verified 2026-06-07 against the de-facto standard — mhxd's
+/// `struct hl_access_bits` (kangsterizer/mhxd, `src/common/hotline.h`).
+/// Bits 0–37 plus the HXD extensions **38 `uploadFolders`, 39
+/// `downloadFolders`, 40 `sendMessages`** all match it exactly. The bits
+/// HXD *reserves* — 12 `closePrivateChat`, 13 `showInList`, 18
+/// `changeOwnPassword`, 19 (Send Private Message, unused here) — are kept
+/// from the older Hotline spec for compatibility with pre-HXD servers;
+/// HXD never sets them, so reading them as 0 is harmless. Don't re-litigate
+/// the bit positions without checking that struct.
 public struct UserPrivileges: OptionSet, Sendable, Hashable {
     public let rawValue: UInt64
 
