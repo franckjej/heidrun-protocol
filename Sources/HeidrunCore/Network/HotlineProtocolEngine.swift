@@ -250,9 +250,17 @@ public actor HotlineProtocolEngine {
             broadcaster.yield(.userLeft(socket: fields.uint16(.socket) ?? 0))
 
         case .userList:
-            let users = fields
-                .filter { $0.key == HotlineObjectKey.userListEntry.rawValue }
-                .compactMap { UserListEntryCodec.decode($0.data, encoding: stringEncoding) }
+            // HXD-family servers overload TX 354: it's a full-roster push
+            // when it carries `userListEntry` (300) objects, but right after
+            // login they also push the connected user's access privileges on
+            // the SAME transaction — an 8-byte `privileges` (110) field with
+            // no user objects. Only surface a roster when entries are present;
+            // a privs-only push must not decode to an empty `.userListReceived`
+            // (which the VM applies as a full replacement and would wipe the
+            // seeded roster).
+            let entries = fields.filter { $0.key == HotlineObjectKey.userListEntry.rawValue }
+            guard !entries.isEmpty else { return }
+            let users = entries.compactMap { UserListEntryCodec.decode($0.data, encoding: stringEncoding) }
             broadcaster.yield(.userListReceived(users: users))
 
         case .broadcast:

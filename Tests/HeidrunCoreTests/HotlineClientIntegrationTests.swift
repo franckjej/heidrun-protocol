@@ -503,6 +503,91 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    /// HXD-family servers reuse TX 354 to push the connected user's access
+    /// privileges right after login — an 8-byte `privileges` (110) field and
+    /// NO `userListEntry` (300) objects. A privs-only 354 must NOT surface as
+    /// `.userListReceived`, because the VM treats that as a full-roster
+    /// snapshot and an empty one wipes the seeded user list.
+    @Test("a privileges-only TX 354 push does not emit an (empty) userListReceived")
+    func privilegesOnly354DoesNotEmitUserList() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+        let events = client.events   // subscribe before the pushes
+
+        // 1) The HXD privileges push (no userListEntry objects).
+        try await sc.sendPush(transactionID: 354, fields: [
+            PacketField(key: .privileges, data: Data(repeating: 0xFF, count: 8))
+        ])
+        // 2) A userChanged sentinel we WILL observe. If a spurious
+        //    userListReceived was emitted for the privs push, it is queued
+        //    ahead of this and we'd see it first.
+        try await sc.sendPush(transactionID: 301, fields: [
+            .uint16(.socket, 9),
+            .uint16(.icon, 3),
+            .uint16(.status, 0),
+            .string(.nickname, "Frank", encoding: .macOSRoman)
+        ])
+
+        let sawUserList = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await event in events {
+                    if case .userListReceived = event { return true }
+                    if case .userChanged = event { return false }   // sentinel
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        #expect(sawUserList == false)
+
+        await client.disconnect()
+        sc.close()
+    }
+
+    /// Regression guard for the fix above: a TX 354 that actually carries
+    /// `userListEntry` objects (a real roster push) must still surface as
+    /// `.userListReceived`.
+    @Test("a TX 354 carrying userListEntry objects still emits userListReceived")
+    func userList354WithEntriesEmitsRoster() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+        let events = client.events
+
+        try await sc.sendPush(transactionID: 354, fields: [
+            PacketField(key: .userListEntry, data: encodedUser(socket: 1, icon: 2, status: 0, nickname: "alice")),
+            PacketField(key: .userListEntry, data: encodedUser(socket: 2, icon: 2, status: 0, nickname: "bob"))
+        ])
+
+        var received: [User]?
+        for await event in events {
+            if case let .userListReceived(users) = event { received = users; break }
+        }
+        #expect(received?.count == 2)
+        #expect(received?.first?.nickname == "alice")
+
+        await client.disconnect()
+        sc.close()
+    }
+
     // MARK: - Helpers
 
     /// Encode a userListEntry blob the way Hotline puts it on the wire.
