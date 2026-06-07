@@ -79,19 +79,35 @@ public struct UserPrivileges: OptionSet, Sendable, Hashable {
         .uploadFolders, .downloadFolders, .sendMessages
     ]
 
-    /// Decode an 8-byte privilege blob from a Hotline packet.
+    /// Decode the canonical 8-byte Hotline access bitmap. Hotline/HXD number
+    /// privilege bit `N` as bit `(7 - N % 8)` of byte `N / 8` — i.e.
+    /// **MSB-first within each byte** (privilege 0 is the high bit of byte 0).
+    /// See the "Access Privileges" section of the protocol docs.
+    ///
+    /// (Through 1.0.0-rc19 this read LSB-first, which only ever round-tripped
+    /// against itself — heidrun-server used the same wrong order, so the two
+    /// agreed while mis-speaking privileges with every real Hotline server.
+    /// rc20 makes it canonical; `rawValue` semantics and stored permissions
+    /// are unchanged, only the wire byte order.)
     public init(bytes: some Sequence<UInt8>) {
         var value: UInt64 = 0
         var byteIndex = 0
         for byte in bytes where byteIndex < 8 {
-            value |= UInt64(byte) << (byteIndex * 8)
+            for bitInByte in 0..<8 where (byte >> (7 - bitInByte)) & 1 == 1 {
+                value |= UInt64(1) << (byteIndex * 8 + bitInByte)
+            }
             byteIndex += 1
         }
         self.rawValue = value
     }
 
-    /// Encode to the 8-byte representation expected on the wire.
+    /// Encode to the canonical 8-byte access bitmap (MSB-first within each
+    /// byte — see `init(bytes:)`).
     public var bytes: [UInt8] {
-        (0..<8).map { UInt8(truncatingIfNeeded: rawValue >> ($0 * 8)) }
+        var result = [UInt8](repeating: 0, count: 8)
+        for bit in 0..<64 where (rawValue >> bit) & 1 == 1 {
+            result[bit / 8] |= UInt8(1) << (7 - (bit % 8))
+        }
+        return result
     }
 }
