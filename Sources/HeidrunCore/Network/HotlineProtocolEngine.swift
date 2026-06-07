@@ -33,6 +33,10 @@ public actor HotlineProtocolEngine {
     /// because the read loop is what sees it — clients read via the
     /// `publicChatSubject` accessor when assembling `connectionInfo`.
     private var publicChatSubject: String = ""
+    /// Connected account's own access privileges from the last "User Access"
+    /// push (TX 354, field 110). Read via `selfPrivilegesValue` when
+    /// assembling `connectionInfo`.
+    private var selfPrivileges: UserPrivileges = []
     private var readerTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var torn = false
@@ -60,6 +64,7 @@ public actor HotlineProtocolEngine {
 
     public var lastTaskNumber: UInt32 { nextTaskNumber &- 1 }
     public var publicChatSubjectValue: String { publicChatSubject }
+    public var selfPrivilegesValue: UserPrivileges { selfPrivileges }
     public var isTorn: Bool { torn }
 
     // MARK: - Lifecycle
@@ -259,7 +264,18 @@ public actor HotlineProtocolEngine {
             // (which the VM applies as a full replacement and would wipe the
             // seeded roster).
             let entries = fields.filter { $0.key == HotlineObjectKey.userListEntry.rawValue }
-            guard !entries.isEmpty else { return }
+            guard !entries.isEmpty else {
+                // No roster objects → it's the "User Access" variant: the
+                // connected user's own privileges bitmap (field 110). Record
+                // it and surface it so the UI can gate admin controls. A UI
+                // hint only — the server still enforces per request.
+                if let privilegesField = fields.first(.privileges) {
+                    let privileges = UserPrivileges(bytes: privilegesField.data)
+                    selfPrivileges = privileges
+                    broadcaster.yield(.userAccessReceived(privileges: privileges))
+                }
+                return
+            }
             let users = entries.compactMap { UserListEntryCodec.decode($0.data, encoding: stringEncoding) }
             broadcaster.yield(.userListReceived(users: users))
 

@@ -588,6 +588,40 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    /// The HXD "User Access" variant of TX 354 (privileges field, no roster
+    /// objects) must surface as `.userAccessReceived` AND be recorded on
+    /// `connectionInfo.privileges` for a late subscriber.
+    @Test("a privileges-only TX 354 surfaces as userAccessReceived + records on connectionInfo")
+    func privilegesOnly354SurfacesUserAccess() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+        let events = client.events
+
+        let sent: UserPrivileges = [.disconnectUsers, .canBroadcast]
+        try await sc.sendPush(transactionID: 354, fields: [
+            PacketField(key: .privileges, data: Data(sent.bytes))
+        ])
+
+        var received: UserPrivileges?
+        for await event in events {
+            if case let .userAccessReceived(privileges) = event { received = privileges; break }
+        }
+        #expect(received == sent)
+
+        // Recorded for a view that starts observing after the push.
+        let info = await client.connectionInfo
+        #expect(info.privileges == sent)
+
+        await client.disconnect()
+        sc.close()
+    }
+
     // MARK: - Helpers
 
     /// Encode a userListEntry blob the way Hotline puts it on the wire.

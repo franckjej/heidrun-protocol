@@ -48,6 +48,14 @@ public enum HotlineEvent: Sendable, Hashable {
     /// The server sent the full user list.
     case userListReceived(users: [User])
 
+    /// The server pushed the connected user's own access privileges
+    /// (HXD "User Access", TX 354, field 110). A UI hint only — it lets the
+    /// client disable/hide controls the account can't use. NOT a security
+    /// boundary: the server still enforces every privilege per request and
+    /// rejects unauthorised transactions regardless. Also recorded on
+    /// `HotlineConnectionInfo.privileges` so a late subscriber can read it.
+    case userAccessReceived(privileges: UserPrivileges)
+
     /// The server (or another admin) broadcast a notice to everyone.
     case broadcastReceived(message: String)
 }

@@ -29,6 +29,14 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
     /// observing after the login-time push can still seed its header.
     public var publicChatSubject: String
 
+    /// The connected account's own access privileges, as last pushed by the
+    /// server via "User Access" (TX 354). Empty until the server sends it
+    /// (or for servers that never do). A UI hint for disabling controls —
+    /// the server still enforces every privilege per request. Recorded by
+    /// the read loop so a view that starts observing after the login-time
+    /// push can still seed its gating.
+    public var privileges: UserPrivileges
+
     public init(
         clientVersion: Int,
         protocolVersion: Int,
@@ -36,7 +44,8 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
         connectionSocket: UInt16,
         lastTaskNumber: UInt32,
         settings: ConnectionSettings,
-        publicChatSubject: String = ""
+        publicChatSubject: String = "",
+        privileges: UserPrivileges = []
     ) {
         self.clientVersion = clientVersion
         self.protocolVersion = protocolVersion
@@ -45,6 +54,7 @@ public struct HotlineConnectionInfo: Sendable, Hashable {
         self.lastTaskNumber = lastTaskNumber
         self.settings = settings
         self.publicChatSubject = publicChatSubject
+        self.privileges = privileges
     }
 }
 

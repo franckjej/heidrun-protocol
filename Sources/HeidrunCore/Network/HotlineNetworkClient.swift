@@ -65,6 +65,7 @@ public actor HotlineNetworkClient: HotlineClient {
             // that changes is the getter's internal shape.
             let lastTask = await engine.lastTaskNumber
             let subject = await engine.publicChatSubjectValue
+            let privileges = await engine.selfPrivilegesValue
             return HotlineConnectionInfo(
                 clientVersion: clientVersion,
                 protocolVersion: protocolVersion,
@@ -72,7 +73,8 @@ public actor HotlineNetworkClient: HotlineClient {
                 connectionSocket: connectionSocket,
                 lastTaskNumber: lastTask,
                 settings: connectionSettings,
-                publicChatSubject: subject
+                publicChatSubject: subject,
+                privileges: privileges
             )
         }
     }

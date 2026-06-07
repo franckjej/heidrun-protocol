@@ -38,10 +38,11 @@ public actor NIOHotlineClient {
     public var connectionInfo: HotlineConnectionInfo {
         get async {
             let lastTask = await engine.lastTaskNumber
+            let privileges = await engine.selfPrivilegesValue
             return HotlineConnectionInfo(
                 clientVersion: 151, protocolVersion: 2, serverVersion: serverVersion,
                 connectionSocket: connectionSocket, lastTaskNumber: lastTask,
-                settings: settings
+                settings: settings, privileges: privileges
             )
         }
     }
