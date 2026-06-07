@@ -83,16 +83,18 @@ extension HotlineNetworkClient {
     }
 
     public func deleteNewsBundle(at path: RemotePath) async throws {
-            // transID 380, no-reply, [newsPath(325)].
-        try await sendNoReply(
+            // transID 380. Await the reply so a server denial (e.g. no
+            // deleteNewsBundles privilege) surfaces as a thrown error.
+        _ = try await sendExpectingReply(
             transactionID: 380,
             fields: [.path(.newsPath, path, encoding: stringEncoding)]
         )
     }
 
     public func deleteNewsThread(at path: RemotePath, threadID: UInt16, cascade: Bool) async throws {
-            // transID 411, no-reply, [newsPath(325), articleID(326), deleteAll(337)].
-        try await sendNoReply(
+            // transID 411. Await the reply so a denial (e.g. no deleteArticles
+            // privilege) surfaces instead of failing silently.
+        _ = try await sendExpectingReply(
             transactionID: 411,
             fields: [
                 .path(.newsPath, path, encoding: stringEncoding),
@@ -108,7 +110,9 @@ extension HotlineNetworkClient {
             // newsCategoryName (322), per HEClient.m line 1229.
         let transactionID: UInt16 = isCategory ? 382 : 381
         let nameKey: HotlineObjectKey = isCategory ? .newsCategoryName : .fileName
-        try await sendNoReply(
+        // Await the reply so a denial (no createNewsBundles/createCategories)
+        // surfaces as an error.
+        _ = try await sendExpectingReply(
             transactionID: transactionID,
             fields: [
                 .string(nameKey, name, encoding: stringEncoding),
@@ -124,10 +128,11 @@ extension HotlineNetworkClient {
         type: String,
         body: String
     ) async throws {
-            // transID 410, no-reply, 6 fields:
+            // transID 410, 6 fields:
             //   newsPath(325), articleID(326), title(328), articleFlags(334=0),
             //   type(327), body(333).
-        try await sendNoReply(
+            // Await the reply so a denial (no postNews) surfaces as an error.
+        _ = try await sendExpectingReply(
             transactionID: 410,
             fields: [
                 .path(.newsPath, path, encoding: stringEncoding),

@@ -450,7 +450,8 @@ public actor NIOHotlineClient {
                 .string(.newsType, type, encoding: stringEncoding),
                 .string(.newsData, body, encoding: stringEncoding)
             ],
-            expectsReply: false
+            // Await the reply so a denial (no postNews) surfaces as an error.
+            expectsReply: true
         )
     }
 
