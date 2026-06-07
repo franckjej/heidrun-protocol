@@ -59,13 +59,12 @@ public struct PacketObserver: Sendable {
         107,            // login
         108,            // sendPrivateMessage
         110,            // kick
-        112,            // changeChatSubject
-        113,            // requestAttention
-        115,            // joinPrivateChat
-        116,            // leavePrivateChat
-        117,            // invite
-        118,            // createPrivateChat
-        120,            // rejectPrivateChat
+        112,            // createPrivateChat (CHAT_CREATE)
+        113,            // invite (CHAT_INVITE)
+        114,            // rejectPrivateChat (CHAT_DECLINE)
+        115,            // joinPrivateChat (CHAT_JOIN)
+        116,            // leavePrivateChat (CHAT_PART)
+        120,            // changeChatSubject (CHAT_SUBJECT)
         121,            // agreeToAgreement
         200,            // listFiles
         202,            // downloadFile
