@@ -53,3 +53,66 @@ enum AdminParse {
         return .ok((socket, ban))
     }
 }
+
+extension Heidrun {
+    /// Handle an admin REPL command. Returns `true` if `command` was an admin
+    /// command (handled), `false` if not (caller falls through to the normal
+    /// switch / server-forward). Errors print to stderr.
+    func handleAdminCommand(
+        _ command: String,
+        argument: String,
+        client: NIOHotlineClient
+    ) async throws -> Bool {
+        let tokens = argument.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        switch command {
+        case "newuser", "createuser":
+            let parsed = AdminParse.createUser(tokens)
+            guard let user = parsed.value else { return adminUsage(parsed.error) }
+            try await client.createLogin(
+                name: user.login, password: user.password,
+                nickname: user.nickname, privileges: user.privileges
+            )
+            adminOut("created login '\(user.login)'")
+        case "deluser", "deleteuser":
+            guard let login = tokens.first else { return adminUsage("usage: deluser <login>") }
+            try await client.deleteLogin(login)
+            adminOut("deleted login '\(login)'")
+        case "getuser", "showuser":
+            guard let login = tokens.first else { return adminUsage("usage: getuser <login>") }
+            let info = try await client.openLogin(login)
+            let privs = PrivilegeNames.names(in: info.privileges)
+            adminOut("\(login): \(info.nickname)  [\(privs.isEmpty ? "no privileges" : privs.joined(separator: ", "))]")
+        case "moduser", "modifyuser":
+            let parsed = AdminParse.modifyUser(tokens)
+            guard let user = parsed.value else { return adminUsage(parsed.error) }
+            try await client.modifyLogin(
+                name: user.login, password: user.password,
+                nickname: user.nickname, privileges: user.privileges
+            )
+            adminOut("modified login '\(user.login)'")
+        case "kick":
+            let parsed = AdminParse.kick(tokens)
+            guard let target = parsed.value else { return adminUsage(parsed.error) }
+            try await client.kick(socket: target.socket, ban: target.ban)
+            adminOut("kicked socket \(target.socket)\(target.ban ? " (banned)" : "")")
+        case "broadcast":
+            let message = argument.trimmingCharacters(in: .whitespaces)
+            guard !message.isEmpty else { return adminUsage("usage: broadcast <message>") }
+            try await client.broadcast(message)
+            adminOut("broadcast sent")
+        default:
+            return false   // not an admin command
+        }
+        return true
+    }
+
+    private func adminOut(_ line: String) {
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+    }
+
+    /// Print a usage/error line to stderr and return `true` (command was ours, handled).
+    private func adminUsage(_ message: String?) -> Bool {
+        FileHandle.standardError.write(Data(((message ?? "admin error") + "\n").utf8))
+        return true
+    }
+}

@@ -660,6 +660,9 @@ struct Heidrun: AsyncParsableCommand {
         // sees the same value (a `/cd` in the middle of the same
         // command can't happen, but the snapshot keeps reads cheap).
         let cwd = await cwdHolder.get()
+        if try await handleAdminCommand(command, argument: argument, client: client) {
+            return true
+        }
         switch command {
         case "quit", "exit", "q":
             return false
@@ -971,6 +974,13 @@ struct Heidrun: AsyncParsableCommand {
           /help                  this help
           /quit                  disconnect and exit
 
+          /newuser <login> <pass> <nick> [priv,…]   create a login (admin)
+          /deluser <login>                          delete a login (admin)
+          /getuser <login>                          show a login's nick + privileges (admin)
+          /moduser <login> <nick> [priv,…] [pass]   modify a login (admin)
+          /kick <socket> [ban]                      disconnect a user (admin)
+          /broadcast <message>                      server-wide broadcast (admin)
+
         anything else starting with / is sent to the server as chat,
         so server-side commands (e.g. heidrun-server's /topic) work
         without the client knowing about them.
@@ -1050,19 +1060,28 @@ struct Heidrun: AsyncParsableCommand {
     /// and the `printHelp` block — the price of a thin CLI is three
     /// places that need to agree on the verb list.
     private static let builtinCommands: [String] = [
+        "broadcast",
         "cd",
+        "createuser",
+        "deluser",
+        "deleteuser",
         "download",
         "exit",
         "finfo",
         "get",
+        "getuser",
         "help",
         "info",
+        "kick",
         "ls",
         "mkdir",
         "mv",
         "rm",
         "me",
+        "modifyuser",
+        "moduser",
         "msg",
+        "newuser",
         "news",
         "nick",
         "post",
@@ -1071,6 +1090,7 @@ struct Heidrun: AsyncParsableCommand {
         "pm",
         "q",
         "quit",
+        "showuser",
         "tnews",
         "tpost",
         "tread",
