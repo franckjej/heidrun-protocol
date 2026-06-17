@@ -6,11 +6,11 @@ import HeidrunCore
 struct AdminParseTests {
     @Test("createUser parses login/password/nickname + optional privileges")
     func createUser() throws {
-        let ok = try #require(AdminParse.createUser(["bob", "secret", "Bob", "readChat,sendChat"]).value)
-        #expect(ok.login == "bob")
-        #expect(ok.password == "secret")
-        #expect(ok.nickname == "Bob")
-        #expect(ok.privileges == [.readChat, .sendChat])
+        let created = try #require(AdminParse.createUser(["bob", "secret", "Bob", "readChat,sendChat"]).value)
+        #expect(created.login == "bob")
+        #expect(created.password == "secret")
+        #expect(created.nickname == "Bob")
+        #expect(created.privileges == [.readChat, .sendChat])
 
         let noPriv = try #require(AdminParse.createUser(["bob", "secret", "Bob"]).value)
         #expect(noPriv.privileges == [])

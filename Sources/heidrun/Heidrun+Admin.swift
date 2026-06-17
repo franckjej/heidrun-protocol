@@ -120,6 +120,13 @@ extension Heidrun {
     /// Returns `true` if an admin one-shot flag was given (and handled); throws
     /// `OneShotError` on a usage problem so the caller exits non-zero.
     func runAdminOneShot(client: NIOHotlineClient) async throws -> Bool {
+        let activeAdminFlags = [
+            !createUser.isEmpty, deleteUser != nil, showUser != nil,
+            !modifyUser.isEmpty, kick != nil, broadcast != nil
+        ].filter { $0 }.count
+        guard activeAdminFlags <= 1 else {
+            throw OneShotError("use only one admin flag at a time")
+        }
         if !createUser.isEmpty {
             let parsed = AdminParse.createUser(createUser)
             guard let user = parsed.value else { throw OneShotError(parsed.error ?? "bad --create-user") }
@@ -133,8 +140,9 @@ extension Heidrun {
         if let login = showUser {
             let info = try await client.openLogin(login)
             let privs = PrivilegeNames.names(in: info.privileges)
+            let privList = privs.isEmpty ? "no privileges" : privs.joined(separator: ", ")
             FileHandle.standardOutput.write(Data(
-                "\(login): \(info.nickname)  [\(privs.joined(separator: ", "))]\n".utf8))
+                "\(login): \(info.nickname)  [\(privList)]\n".utf8))
             return true
         }
         if !modifyUser.isEmpty {
