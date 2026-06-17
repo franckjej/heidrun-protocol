@@ -116,5 +116,34 @@ struct NIOHotlineAdminTests {
         try await serverSide
         await client.disconnect()
     }
+
+    @Test("openLogin sends TX 352 with PLAIN login and parses the reply")
+    func openLogin() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let open = try await conn.readPacket()
+            #expect(open.header.transactionID == 352)
+            // login is sent PLAIN (not obfuscated) for 352:
+            #expect(open.fields.string(.login, encoding: .macOSRoman) == "bob")
+            try await conn.sendReply(
+                transactionID: 352, taskNumber: open.header.taskNumber,
+                fields: [
+                    .string(.nickname, "Bob", encoding: .macOSRoman),
+                    PacketField(key: .privileges, data: Data(UserPrivileges([.readChat, .postNews]).bytes))
+                ])
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        let result = try await client.openLogin("bob")
+        #expect(result.nickname == "Bob")
+        #expect(result.privileges == [.readChat, .postNews])
+        try await serverSide
+        await client.disconnect()
+    }
 }
 #endif

@@ -549,6 +549,18 @@ public actor NIOHotlineClient {
         )
     }
 
+    public func openLogin(_ name: String) async throws -> (nickname: String, privileges: UserPrivileges) {
+        // login is sent PLAIN for 352 (HEClient.m:995 quirk), unlike 350/351/353.
+        let reply = try await send(
+            transactionID: 352,
+            fields: [.string(.login, name, encoding: stringEncoding)],
+            expectsReply: true
+        )
+        let nickname = reply.string(.nickname, encoding: stringEncoding) ?? ""
+        let privileges = reply.first(.privileges).map { UserPrivileges(bytes: Array($0.data)) } ?? []
+        return (nickname: nickname, privileges: privileges)
+    }
+
     // MARK: Lifecycle (forwarded to the engine)
 
     public func disconnect() async {
