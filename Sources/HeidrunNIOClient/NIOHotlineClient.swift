@@ -529,6 +529,26 @@ public actor NIOHotlineClient {
         )
     }
 
+    public func createLogin(
+        name: String, password: String, nickname: String, privileges: UserPrivileges
+    ) async throws {
+        let fields: [PacketField] = [
+            .obfuscatedString(.login, name, encoding: stringEncoding),
+            .obfuscatedString(.password, password, encoding: stringEncoding),
+            .string(.nickname, nickname, encoding: stringEncoding),
+            PacketField(key: .privileges, data: Data(privileges.bytes))
+        ]
+        try await send(transactionID: 350, fields: fields, expectsReply: true)
+    }
+
+    public func deleteLogin(_ name: String) async throws {
+        try await send(
+            transactionID: 351,
+            fields: [.obfuscatedString(.login, name, encoding: stringEncoding)],
+            expectsReply: true
+        )
+    }
+
     // MARK: Lifecycle (forwarded to the engine)
 
     public func disconnect() async {

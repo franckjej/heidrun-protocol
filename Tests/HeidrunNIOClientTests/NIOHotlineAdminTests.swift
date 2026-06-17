@@ -69,5 +69,52 @@ struct NIOHotlineAdminTests {
         try await serverSide
         await client.disconnect()
     }
+
+    @Test("createLogin sends TX 350 with obfuscated login/password, plain nickname, privilege bytes")
+    func createLogin() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let create = try await conn.readPacket()
+            #expect(create.header.transactionID == 350)
+            #expect(create.fields.obfuscatedString(.login, encoding: .macOSRoman) == "bob")
+            #expect(create.fields.obfuscatedString(.password, encoding: .macOSRoman) == "secret")
+            #expect(create.fields.string(.nickname, encoding: .macOSRoman) == "Bob")
+            #expect(Array(create.fields.first(.privileges)?.data ?? Data())
+                    == UserPrivileges([.readChat, .sendChat]).bytes)
+            try await conn.sendReply(transactionID: 350, taskNumber: create.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.createLogin(name: "bob", password: "secret", nickname: "Bob",
+                                     privileges: [.readChat, .sendChat])
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("deleteLogin sends TX 351 with obfuscated login")
+    func deleteLogin() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let del = try await conn.readPacket()
+            #expect(del.header.transactionID == 351)
+            #expect(del.fields.obfuscatedString(.login, encoding: .macOSRoman) == "bob")
+            try await conn.sendReply(transactionID: 351, taskNumber: del.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.deleteLogin("bob")
+        try await serverSide
+        await client.disconnect()
+    }
 }
 #endif
