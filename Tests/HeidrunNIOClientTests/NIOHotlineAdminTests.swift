@@ -183,5 +183,29 @@ struct NIOHotlineAdminTests {
         try await serverSide
         await client.disconnect()
     }
+
+    @Test("an admin reply with errorID surfaces as a thrown HotlineError")
+    func errorReplyThrows() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let create = try await conn.readPacket()
+            try await conn.sendReply(
+                transactionID: 350, taskNumber: create.header.taskNumber,
+                errorID: 1,
+                fields: [.string(.errorMessage, "login already exists", encoding: .macOSRoman)])
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        await #expect(throws: HotlineError.self) {
+            try await client.createLogin(name: "dup", password: "p", nickname: "Dup", privileges: [])
+        }
+        try await serverSide
+        await client.disconnect()
+    }
 }
 #endif
