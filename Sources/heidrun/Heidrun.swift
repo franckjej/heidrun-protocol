@@ -41,6 +41,32 @@ struct Heidrun: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "Scripting: upload a local file to a remote directory, then exit. Usage: --upload <localpath> [<remotedir>].")
     var upload: [String] = []
 
+    @Option(name: .long, parsing: .upToNextOption,
+            help: "Scripting: create a login, then exit. Usage: --create-user <login> <password> <nickname> [priv,…]")
+    var createUser: [String] = []
+
+    @Option(name: .long, help: "Scripting: delete a login, then exit.")
+    var deleteUser: String?
+
+    @Option(name: .long, help: "Scripting: print a login's nickname + privileges, then exit.")
+    var showUser: String?
+
+    @Option(name: .long, parsing: .upToNextOption,
+            help: "Scripting: modify a login, then exit. Usage: --modify-user <login> <nickname> [priv,…]")
+    var modifyUser: [String] = []
+
+    @Option(name: .long, help: "Scripting: password to set with --modify-user (omit to leave unchanged).")
+    var userPassword: String?
+
+    @Option(name: .long, help: "Scripting: disconnect a user by socket, then exit.")
+    var kick: UInt16?
+
+    @Flag(name: .long, help: "Ban the --kick target.")
+    var ban: Bool = false
+
+    @Option(name: .long, help: "Scripting: send a server-wide broadcast, then exit.")
+    var broadcast: String?
+
     func run() async throws {
         let (host, port) = parseAddress(server)
         let settings = ConnectionSettings(
@@ -53,9 +79,11 @@ struct Heidrun: AsyncParsableCommand {
             useTLS: false
         )
 
-        // Scripting one-shot: --download / --upload perform a single
-        // transfer and exit, bypassing the interactive REPL.
-        if download != nil || !upload.isEmpty {
+        // Scripting one-shot: --download / --upload / admin flags perform
+        // a single operation and exit, bypassing the interactive REPL.
+        let adminOneShot = !createUser.isEmpty || deleteUser != nil || showUser != nil
+            || !modifyUser.isEmpty || kick != nil || broadcast != nil
+        if download != nil || !upload.isEmpty || adminOneShot {
             try await runOneShot(settings: settings)
             return
         }
@@ -573,6 +601,8 @@ struct Heidrun: AsyncParsableCommand {
             Task { await liveClient.disconnect() }
         }
         let client = session.client
+
+        if try await runAdminOneShot(client: client) { return }
 
         if let remote = download {
             let components = Self.resolveRemotePath(remote, against: RemotePath()).components

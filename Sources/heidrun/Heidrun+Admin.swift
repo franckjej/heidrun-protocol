@@ -115,4 +115,48 @@ extension Heidrun {
         FileHandle.standardError.write(Data(((message ?? "admin error") + "\n").utf8))
         return true
     }
+
+    /// Perform a single admin one-shot op against an already-connected client.
+    /// Returns `true` if an admin one-shot flag was given (and handled); throws
+    /// `OneShotError` on a usage problem so the caller exits non-zero.
+    func runAdminOneShot(client: NIOHotlineClient) async throws -> Bool {
+        if !createUser.isEmpty {
+            let parsed = AdminParse.createUser(createUser)
+            guard let user = parsed.value else { throw OneShotError(parsed.error ?? "bad --create-user") }
+            try await client.createLogin(name: user.login, password: user.password,
+                                         nickname: user.nickname, privileges: user.privileges)
+            return true
+        }
+        if let login = deleteUser {
+            try await client.deleteLogin(login); return true
+        }
+        if let login = showUser {
+            let info = try await client.openLogin(login)
+            let privs = PrivilegeNames.names(in: info.privileges)
+            FileHandle.standardOutput.write(Data(
+                "\(login): \(info.nickname)  [\(privs.joined(separator: ", "))]\n".utf8))
+            return true
+        }
+        if !modifyUser.isEmpty {
+            let parsed = AdminParse.modifyUser(modifyUser)
+            guard let user = parsed.value else { throw OneShotError(parsed.error ?? "bad --modify-user") }
+            // --user-password overrides the trailing-token form.
+            try await client.modifyLogin(name: user.login, password: userPassword ?? user.password,
+                                         nickname: user.nickname, privileges: user.privileges)
+            return true
+        }
+        if let socket = kick {
+            try await client.kick(socket: socket, ban: ban); return true
+        }
+        if let message = broadcast {
+            try await client.broadcast(message); return true
+        }
+        return false
+    }
+}
+
+/// Thrown by an admin one-shot usage error so `runOneShot` exits non-zero.
+struct OneShotError: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }
