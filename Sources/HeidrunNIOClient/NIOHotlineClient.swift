@@ -561,6 +561,24 @@ public actor NIOHotlineClient {
         return (nickname: nickname, privileges: privileges)
     }
 
+    public func modifyLogin(
+        name: String, password: String?, nickname: String, privileges: UserPrivileges
+    ) async throws {
+        var fields: [PacketField] = [
+            .string(.nickname, nickname, encoding: stringEncoding),
+            .obfuscatedString(.login, name, encoding: stringEncoding)
+        ]
+        if let password {
+            if password.isEmpty {
+                fields.append(PacketField(key: .password, data: Data([0x00])))
+            } else {
+                fields.append(.obfuscatedString(.password, password, encoding: stringEncoding))
+            }
+        }
+        fields.append(PacketField(key: .privileges, data: Data(privileges.bytes)))
+        try await send(transactionID: 353, fields: fields, expectsReply: true)
+    }
+
     // MARK: Lifecycle (forwarded to the engine)
 
     public func disconnect() async {

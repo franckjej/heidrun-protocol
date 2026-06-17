@@ -145,5 +145,43 @@ struct NIOHotlineAdminTests {
         try await serverSide
         await client.disconnect()
     }
+
+    @Test("modifyLogin: nil omits password, empty sends 0x00, non-empty obfuscates")
+    func modifyLoginPasswordCases() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+
+            // 1) nil password → no .password field
+            let a = try await conn.readPacket()
+            #expect(a.header.transactionID == 353)
+            #expect(a.fields.string(.nickname, encoding: .macOSRoman) == "Bob")
+            #expect(a.fields.obfuscatedString(.login, encoding: .macOSRoman) == "bob")
+            #expect(a.fields.first(.password) == nil)
+            #expect(Array(a.fields.first(.privileges)?.data ?? Data()) == UserPrivileges([.readChat]).bytes)
+            try await conn.sendReply(transactionID: 353, taskNumber: a.header.taskNumber)
+
+            // 2) empty password → single 0x00 byte
+            let b = try await conn.readPacket()
+            #expect(b.fields.first(.password)?.data == Data([0x00]))
+            try await conn.sendReply(transactionID: 353, taskNumber: b.header.taskNumber)
+
+            // 3) non-empty password → obfuscated
+            let c = try await conn.readPacket()
+            #expect(c.fields.obfuscatedString(.password, encoding: .macOSRoman) == "newpass")
+            try await conn.sendReply(transactionID: 353, taskNumber: c.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.modifyLogin(name: "bob", password: nil, nickname: "Bob", privileges: [.readChat])
+        try await client.modifyLogin(name: "bob", password: "", nickname: "Bob", privileges: [.readChat])
+        try await client.modifyLogin(name: "bob", password: "newpass", nickname: "Bob", privileges: [.readChat])
+        try await serverSide
+        await client.disconnect()
+    }
 }
 #endif
