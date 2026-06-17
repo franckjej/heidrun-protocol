@@ -513,6 +513,22 @@ public actor NIOHotlineClient {
         return String(data: field.data, encoding: encoding) ?? ""
     }
 
+    // MARK: - Admin
+
+    public func kick(socket: UInt16, ban: Bool) async throws {
+        var fields: [PacketField] = [.uint16(.socket, socket)]
+        if ban { fields.append(.uint16(.banFlag, 1)) }
+        try await send(transactionID: 110, fields: fields, expectsReply: true)
+    }
+
+    public func broadcast(_ message: String) async throws {
+        try await send(
+            transactionID: 355,
+            fields: [.string(.message, message, encoding: stringEncoding)],
+            expectsReply: true
+        )
+    }
+
     // MARK: Lifecycle (forwarded to the engine)
 
     public func disconnect() async {

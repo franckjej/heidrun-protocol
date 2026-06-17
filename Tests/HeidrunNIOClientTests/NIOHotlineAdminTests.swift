@@ -1,0 +1,73 @@
+#if canImport(Network)
+import Foundation
+import Testing
+import HeidrunCore
+@testable import HeidrunNIOClient
+
+@Suite("NIOHotlineClient admin")
+struct NIOHotlineAdminTests {
+    @Test("kick sends TX 110 with socket and ban flag")
+    func kickWithBan() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let kick = try await conn.readPacket()
+            #expect(kick.header.transactionID == 110)
+            #expect(kick.fields.uint16(.socket) == 42)
+            #expect(kick.fields.uint16(.banFlag) == 1)
+            try await conn.sendReply(transactionID: 110, taskNumber: kick.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.kick(socket: 42, ban: true)
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("kick without ban omits the ban flag")
+    func kickNoBan() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let kick = try await conn.readPacket()
+            #expect(kick.fields.uint16(.socket) == 7)
+            #expect(kick.fields.uint16(.banFlag) == nil)
+            try await conn.sendReply(transactionID: 110, taskNumber: kick.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.kick(socket: 7, ban: false)
+        try await serverSide
+        await client.disconnect()
+    }
+
+    @Test("broadcast sends TX 355 with the message")
+    func broadcast() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            let bc = try await conn.readPacket()
+            #expect(bc.header.transactionID == 355)
+            #expect(bc.fields.string(.message, encoding: .macOSRoman) == "server going down")
+            try await conn.sendReply(transactionID: 355, taskNumber: bc.header.taskNumber)
+        }()
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port))
+        try await client.login(name: "admin", password: "p", nickname: "Admin", icon: 1, emoji: nil)
+        try await client.broadcast("server going down")
+        try await serverSide
+        await client.disconnect()
+    }
+}
+#endif
