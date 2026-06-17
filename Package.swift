@@ -35,7 +35,11 @@ let package = Package(
             ]
         ),
         .testTarget(name: "HeidrunCoreTests", dependencies: ["HeidrunCore"]),
-        .testTarget(name: "HeidrunNIOClientTests", dependencies: ["HeidrunNIOClient", "HeidrunCore"])
+        .testTarget(name: "HeidrunNIOClientTests", dependencies: ["HeidrunNIOClient", "HeidrunCore"]),
+        .testTarget(
+            name: "heidrunTests",
+            dependencies: ["heidrun"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
