@@ -60,7 +60,9 @@ enum NIOTransferConnection {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
-        fileManager.createFile(atPath: destination.path, contents: nil)
+        // Discard the Bool: a failure here surfaces as a descriptive error
+        // from the FileHandle open on the next line.
+        _ = fileManager.createFile(atPath: destination.path, contents: nil)
         let handle = try FileHandle(forWritingTo: destination)
         defer { try? handle.close() }
 
