@@ -108,6 +108,7 @@ public enum FolderDownloadDecoder {
         actor: FileTransferActor,
         encoding: String.Encoding,
         resumeProvider: FolderDownloadResumeProvider? = nil,
+        progress: (@Sendable (Int) async -> Void)? = nil,
         continuation: AsyncThrowingStream<FolderDownloadItem, Error>.Continuation
     ) async {
         do {
@@ -115,7 +116,8 @@ public enum FolderDownloadDecoder {
                 guard let item = try await readItem(
                     actor: actor,
                     encoding: encoding,
-                    resumeProvider: resumeProvider
+                    resumeProvider: resumeProvider,
+                    progress: progress
                 ) else {
                     return
                 }
@@ -149,7 +151,8 @@ public enum FolderDownloadDecoder {
     private static func readItem(
         actor: FileTransferActor,
         encoding: String.Encoding,
-        resumeProvider: FolderDownloadResumeProvider?
+        resumeProvider: FolderDownloadResumeProvider?,
+        progress: (@Sendable (Int) async -> Void)? = nil
     ) async throws -> FolderDownloadItem? {
         let headerSize = try await actor.receiveUInt16()
         guard headerSize > 0 else { return nil }
@@ -185,7 +188,19 @@ public enum FolderDownloadDecoder {
         let dataHeader = try await actor.receiveExactly(16)
         var dataCursor = ByteCursor(data: dataHeader, offset: 12)
         let dataLength: UInt32 = dataCursor.readBigEndian()
-        let dataFork = try await actor.receiveExactly(Int(dataLength))
+        // Read the data fork in windows so callers can show live progress
+        // instead of a single jump when the whole file lands. `progress`
+        // reports the byte delta of each window.
+        var dataFork = Data()
+        dataFork.reserveCapacity(Int(dataLength))
+        var remainingData = Int(dataLength)
+        let window = 64 * 1024
+        while remainingData > 0 {
+            let chunk = try await actor.receiveExactly(min(window, remainingData))
+            dataFork.append(chunk)
+            remainingData -= chunk.count
+            await progress?(chunk.count)
+        }
 
         let macrHeader = try await actor.receiveExactly(16)
         var macrCursor = ByteCursor(data: macrHeader, offset: 12)

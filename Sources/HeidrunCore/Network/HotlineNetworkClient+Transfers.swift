@@ -479,7 +479,8 @@ extension HotlineNetworkClient {
     /// where to write the incoming bytes.
     nonisolated public func folderDownloadStream(
         for handle: TransferHandle,
-        resumeProvider: FolderDownloadResumeProvider? = nil
+        resumeProvider: FolderDownloadResumeProvider? = nil,
+        progress: (@Sendable (Int) async -> Void)? = nil
     ) -> AsyncThrowingStream<FolderDownloadItem, Error> {
         AsyncThrowingStream { continuation in
             Task { [weak self] in
@@ -496,6 +497,7 @@ extension HotlineNetworkClient {
                     actor: actor,
                     encoding: encoding,
                     resumeProvider: resumeProvider,
+                    progress: progress,
                     continuation: continuation
                 )
                 continuation.finish()

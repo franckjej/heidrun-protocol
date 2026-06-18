@@ -422,10 +422,13 @@ public protocol HotlineClient: Sendable {
     /// non-fresh `ResumeInfo` makes the decoder ask the server to resume
     /// from `dataForkOffset` instead of restarting the file.
     ///
-    /// Apple-only: the per-item decoder lives behind `canImport(Network)`.
+    /// `progress` reports the byte delta of each data-fork window as it
+    /// arrives, so callers can show live progress instead of a per-file
+    /// jump. Apple-only: the per-item decoder lives behind `canImport(Network)`.
     func folderDownloadStream(
         for handle: TransferHandle,
-        resumeProvider: FolderDownloadResumeProvider?
+        resumeProvider: FolderDownloadResumeProvider?,
+        progress: (@Sendable (Int) async -> Void)?
     ) -> AsyncThrowingStream<FolderDownloadItem, Error>
     #endif
 
@@ -501,7 +504,8 @@ extension HotlineClient {
     /// with the real per-item decoder.
     public func folderDownloadStream(
         for handle: TransferHandle,
-        resumeProvider: FolderDownloadResumeProvider? = nil
+        resumeProvider: FolderDownloadResumeProvider? = nil,
+        progress: (@Sendable (Int) async -> Void)? = nil
     ) -> AsyncThrowingStream<FolderDownloadItem, Error> {
         AsyncThrowingStream { continuation in continuation.finish() }
     }
