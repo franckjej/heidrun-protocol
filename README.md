@@ -25,7 +25,7 @@ Hotline-protocol wire format, codecs, and clients for the [Heidrun][heidrun] Mac
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/franckjej/heidrun-protocol.git", exact: "1.0.0-rc15")
+    .package(url: "https://github.com/franckjej/heidrun-protocol.git", exact: "1.0.0-rc23")
 ]
 
 // in a target's dependencies:
@@ -54,10 +54,28 @@ Opens an interactive Hotline session. The REPL works like classic HX:
 - **Files** — `/ls [path]`, `/finfo <path>`, `/get <path>`, `/put <local> [<remote-dir>]` (HTXF, 64 KiB chunks, progress)
 - **News (plain)** — `/news`, `/post <text>`
 - **News (threaded)** — `/tnews [path]`, `/tthreads <path>`, `/tread <path> <id>`, `/tpost <path> | <title> | <body>`, `/treply <path> <id> | <body>`
+- **Admin** (needs the matching server privileges) — `/newuser <login> <pass> <nick> [priv,…]`, `/getuser <login>`, `/moduser <login> <nick> [priv,…] [pass]`, `/deluser <login>`, `/kick <socket> [ban]`, `/broadcast <message>`. Privileges are comma-separated names (e.g. `readChat,sendChat,postNews`); `/getuser` lists them back.
 - **Server-forwarded** — any unrecognised `/cmd` is forwarded as chat (e.g. `/topic <subject>`). `//foo` sends the literal text `/foo`.
-- **Housekeeping** — `/quit`, `/help`
+- **Housekeeping** — `/help`, `/version` (CLI + negotiated protocol versions; `//version` asks the server for its own), `/privs` (list the privilege names admin commands accept), `/quit`
 
 Arrow keys browse command history (persists at `~/.heidrun_history`); TAB completes builtin command names; the connection auto-reconnects on disconnect with capped exponential backoff.
+
+### Scripting (one-shot admin)
+
+For CI and shell scripts, the admin operations are also available as flags that connect, perform one operation, and exit with a status code (non-zero on a usage or server error) — no REPL:
+
+```bash
+heidrun <host> -l admin -p <pw> --create-user bob secret Bob readChat,sendChat
+heidrun <host> -l admin -p <pw> --show-user bob
+heidrun <host> -l admin -p <pw> --modify-user bob Bobby readChat --user-password newpass
+heidrun <host> -l admin -p <pw> --kick 5 --ban
+heidrun <host> -l admin -p <pw> --broadcast "back in 5"
+heidrun <host> -l admin -p <pw> --delete-user bob
+```
+
+Flags: `--create-user`, `--show-user`, `--modify-user` (+ `--user-password` to set one), `--delete-user`, `--kick` (+ `--ban`), `--broadcast`. Pass one per invocation.
+
+`heidrun --version` prints the package version and `heidrun --list-privileges` prints the valid privilege names — both work offline (no `<server>` needed).
 
 ## Protocol extensions
 
