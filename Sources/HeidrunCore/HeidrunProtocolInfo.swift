@@ -7,5 +7,5 @@
 /// and `heidrun --version`.
 public enum HeidrunProtocolInfo {
     /// Semantic version of the package. Bumped manually each release.
-    public static let version: String = "1.0.0-rc23"
+    public static let version: String = "1.0.0-rc24"
 }
