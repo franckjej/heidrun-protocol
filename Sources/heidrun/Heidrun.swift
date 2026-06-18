@@ -17,11 +17,12 @@ import HeidrunNIOClient
 struct Heidrun: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "heidrun",
-        abstract: "Cross-platform Hotline client (text-only). Modern HX."
+        abstract: "Cross-platform Hotline client (text-only). Modern HX.",
+        version: HeidrunProtocolInfo.version
     )
 
-    @Argument(help: "Server address — host or host:port. Port defaults to 5500.")
-    var server: String
+    @Argument(help: "Server address — host or host:port. Port defaults to 5500. Optional with --list-privileges.")
+    var server: String?
 
     @Option(name: [.short, .long], help: "Login name (default: guest).")
     var login: String = "guest"
@@ -67,7 +68,18 @@ struct Heidrun: AsyncParsableCommand {
     @Option(name: .long, help: "Scripting: send a server-wide broadcast, then exit.")
     var broadcast: String?
 
+    @Flag(name: .long, help: "Print the privilege names accepted by the admin commands/flags, then exit. No server connection needed.")
+    var listPrivileges: Bool = false
+
     func run() async throws {
+        // Offline one-shot: list the privilege names and exit, no connection.
+        if listPrivileges {
+            Self.printPrivileges(to: .standardOutput)
+            return
+        }
+        guard let server else {
+            throw ValidationError("Missing expected argument '<server>'.")
+        }
         let (host, port) = parseAddress(server)
         let settings = ConnectionSettings(
             name: "heidrun",
@@ -698,6 +710,17 @@ struct Heidrun: AsyncParsableCommand {
             return false
         case "help", "?":
             printHelp()
+        case "version", "ver":
+            let info = await client.connectionInfo
+            var report = "heidrun \(HeidrunProtocolInfo.version) — cross-platform Hotline client (modern HX)\n"
+            report += "Hotline protocol: client advertises v\(info.clientVersion)"
+            if info.serverVersion > 0 {
+                report += ", server reports v\(info.serverVersion)"
+            }
+            report += "\n(use //version to ask the server for its own version string)\n"
+            FileHandle.standardOutput.write(Data(report.utf8))
+        case "privs", "privileges":
+            Self.printPrivileges(to: .standardOutput)
         case "who":
             let users = try await client.fetchUserList()
             printUsers(users)
@@ -970,6 +993,16 @@ struct Heidrun: AsyncParsableCommand {
         return true
     }
 
+    /// Print the privilege names accepted by the admin commands/flags.
+    /// Shared by the `/privs` REPL command and the `--list-privileges`
+    /// one-shot flag.
+    private static func printPrivileges(to handle: FileHandle) {
+        let header = "privilege names (comma-separated; for /newuser, /moduser, "
+            + "--create-user, --modify-user):\n"
+        let body = PrivilegeNames.allNames.joined(separator: ", ") + "\n"
+        handle.write(Data((header + body).utf8))
+    }
+
     private func printHelp() {
         let text = """
         client commands (intercepted locally):
@@ -1002,6 +1035,9 @@ struct Heidrun: AsyncParsableCommand {
                                  threaded news: reply (title auto = "Re: …")
 
           /help                  this help
+          /version               heidrun CLI + negotiated protocol versions
+                                 (//version asks the server for its own)
+          /privs                 list the privilege names admin commands accept
           /quit                  disconnect and exit
 
           /newuser <login> <pass> <nick> [priv,…]   create a login (admin)
@@ -1115,12 +1151,15 @@ struct Heidrun: AsyncParsableCommand {
         "news",
         "nick",
         "post",
+        "privs",
+        "privileges",
         "put",
         "pwd",
         "pm",
         "q",
         "quit",
         "showuser",
+        "version",
         "tnews",
         "tpost",
         "tread",
