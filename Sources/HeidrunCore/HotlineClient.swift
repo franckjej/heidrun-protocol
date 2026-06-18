@@ -412,6 +412,23 @@ public protocol HotlineClient: Sendable {
     /// callers concatenate to disk or wherever they want the bytes.
     func downloadStream(for handle: TransferHandle) -> AsyncThrowingStream<Data, Error>
 
+    #if canImport(Network)
+    /// Stream the items of a folder download started with
+    /// `startFolderDownload(...)`. Each yielded `FolderDownloadItem`
+    /// carries the server-relative path, the data fork, and (when the
+    /// session negotiated `resourceForkSupport`) the resource fork.
+    ///
+    /// When `resumeProvider` is non-nil it is consulted per file: a
+    /// non-fresh `ResumeInfo` makes the decoder ask the server to resume
+    /// from `dataForkOffset` instead of restarting the file.
+    ///
+    /// Apple-only: the per-item decoder lives behind `canImport(Network)`.
+    func folderDownloadStream(
+        for handle: TransferHandle,
+        resumeProvider: FolderDownloadResumeProvider?
+    ) -> AsyncThrowingStream<FolderDownloadItem, Error>
+    #endif
+
     /// Download a single file as a fully-parsed `UploadEnvelope`
     /// (data fork + resource fork + metadata). Requires the session to
     /// have negotiated `resourceForkSupport` on login — check
@@ -478,6 +495,18 @@ public protocol HotlineClient: Sendable {
 }
 
 extension HotlineClient {
+    #if canImport(Network)
+    /// Default no-op for clients that don't drive transfers (test
+    /// doubles). The production `HotlineNetworkClient` overrides this
+    /// with the real per-item decoder.
+    public func folderDownloadStream(
+        for handle: TransferHandle,
+        resumeProvider: FolderDownloadResumeProvider? = nil
+    ) -> AsyncThrowingStream<FolderDownloadItem, Error> {
+        AsyncThrowingStream { continuation in continuation.finish() }
+    }
+    #endif
+
     /// Convenience overload that defaults the metadata to "now",
     /// generic file/creator codes, and an empty resource fork.
     public func sendUpload(

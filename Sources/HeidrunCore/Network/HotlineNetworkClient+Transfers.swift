@@ -73,12 +73,8 @@ extension HotlineNetworkClient {
         let totalSize = reply.uint32(.transferSize) ?? 0
 
         // Open the side channel with the 18-byte folder-download
-        // handshake. Streaming the per-item file payloads is not yet
-        // implemented — the bytes are arriving on the connection but
-        // we don't have a parser for the interleaved item-header /
-        // FILP / INFO / DATA stream yet (HETransferThread.m line 245+).
-        // The caller can already iterate `downloadStream(for:)` to see
-        // the raw bytes if they want to roll their own parser.
+        // handshake. Drive the per-item header / FILP / INFO / DATA /
+        // MACR stream with `folderDownloadStream(for:)`.
         let actor = try await openFolderSideChannel(
             transferID: transferID,
             totalSize: UInt64(totalSize),
