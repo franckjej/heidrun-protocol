@@ -132,7 +132,7 @@ struct UploadFramingTests {
             creator: .unknown,
             creationDate: date,
             modificationDate: date,
-            dataLength: UInt32(data.count)
+            dataLength: UInt64(data.count)
         )
         let suffix = UploadFraming.encodeSuffix(resourceFork: rsrc)
 
@@ -163,7 +163,7 @@ struct UploadFramingTests {
             creator: .unknown,
             creationDate: date,
             modificationDate: date,
-            dataLength: UInt32(data.count)
+            dataLength: UInt64(data.count)
         )
         let suffix = UploadFraming.encodeSuffix()
 

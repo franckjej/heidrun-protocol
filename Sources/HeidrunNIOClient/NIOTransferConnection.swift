@@ -125,7 +125,7 @@ enum NIOTransferConnection {
             fileName: fileName,
             type: type, creator: creator,
             creationDate: creationDate, modificationDate: modificationDate,
-            dataLength: fileSize,
+            dataLength: UInt64(fileSize),
             encoding: encoding
         )
         let suffix = UploadFraming.encodeSuffix(resourceFork: resourceFork)

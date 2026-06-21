@@ -203,7 +203,7 @@ extension HotlineNetworkClient {
             creator: creator,
             creationDate: creationDate,
             modificationDate: modificationDate,
-            dataLength: UInt32(content.count),
+            dataLength: UInt64(content.count),
             encoding: stringEncoding
         )
         try await actor.sendBytes(prefix)

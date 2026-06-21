@@ -108,7 +108,7 @@ public enum UploadFraming {
             creator: creator,
             creationDate: creationDate,
             modificationDate: modificationDate,
-            dataLength: UInt32(data.count),
+            dataLength: UInt64(data.count),
             encoding: encoding
         )
         out.append(data)
@@ -127,7 +127,7 @@ public enum UploadFraming {
         creator: FourCharCode,
         creationDate: Date,
         modificationDate: Date,
-        dataLength: UInt32,
+        dataLength: UInt64,
         encoding: String.Encoding = .macOSRoman
     ) -> Data {
         let nameBytes = fileName.data(using: encoding, allowLossyConversion: true) ?? Data()
@@ -164,7 +164,7 @@ public enum UploadFraming {
         out.append(Data(repeating: 0, count: 2))              // trailing pad
 
         // DATA fork header (16 bytes).
-        out.append(forkHeader(magic: "DATA", length: UInt64(dataLength)))
+        out.append(forkHeader(magic: "DATA", length: dataLength))
 
         return out
     }
