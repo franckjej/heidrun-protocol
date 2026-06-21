@@ -55,6 +55,64 @@ public enum TransferHandshake {
         return data
     }
 
+    // MARK: - Large-file variant (CAPABILITY_LARGE_FILES)
+
+    /// Flag bit: this transfer is a large file (negotiated 64-bit path).
+    public static let flagLargeFile: UInt32 = 0x1
+    /// Flag bit: the trailing UInt64 carries the authoritative size.
+    public static let flagSize64: UInt32 = 0x2
+
+    /// Byte count of the 24-byte large-file handshake variant.
+    public static let largeFileByteCount = 24
+
+    /// 24-byte handshake variant carrying a 64-bit size:
+    /// ```
+    /// "HTXF" + UInt32 transferID
+    ///        + UInt32 legacyLen   (0 when size > 4 GiB, else UInt32(size))
+    ///        + UInt32 flags       (flagLargeFile | flagSize64)
+    ///        + UInt64 size
+    /// ```
+    public static func encodeLargeFile(transferID: UInt32, size: UInt64) -> Data {
+        var data = Data(capacity: largeFileByteCount)
+        data.append(contentsOf: magic)
+        data.appendBigEndian(transferID)
+        let legacyLen: UInt32 = size > UInt64(UInt32.max) ? 0 : UInt32(size)
+        data.appendBigEndian(legacyLen)
+        data.appendBigEndian(flagLargeFile | flagSize64)
+        data.appendBigEndian(size)
+        return data
+    }
+
+    /// Decoded result of `parse(_:)`, covering both the legacy 16-byte and
+    /// the 24-byte large-file handshakes.
+    public struct Parsed: Sendable {
+        public let transferID: UInt32
+        public let size: UInt64
+        public let isLargeFile: Bool
+    }
+
+    /// Parse a 16- or 24-byte HTXF handshake. Returns `nil` when the magic
+    /// is wrong or the buffer is too short.
+    public static func parse(_ data: Data) -> Parsed? {
+        guard data.count >= byteCount else { return nil }
+        var cursor = ByteCursor(data: data)
+        let magicBytes = cursor.readData(count: 4)
+        guard Array(magicBytes) == magic else { return nil }
+        let transferID: UInt32 = cursor.readBigEndian()
+        let legacyLen: UInt32 = cursor.readBigEndian()
+        let flags: UInt32 = cursor.readBigEndian()
+
+        if data.count >= largeFileByteCount && (flags & flagSize64) != 0 {
+            let size: UInt64 = cursor.readBigEndian()
+            return Parsed(transferID: transferID, size: size, isLargeFile: true)
+        }
+        return Parsed(
+            transferID: transferID,
+            size: UInt64(legacyLen),
+            isLargeFile: (flags & flagLargeFile) != 0
+        )
+    }
+
     /// 16-byte handshake for a server-banner download (transID 212).
     /// Per the Hotline protocol spec, the trailing `_reserved1` UInt32
     /// is split into two UInt16 fields with values `2, 0` — the
