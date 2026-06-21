@@ -172,15 +172,12 @@ public actor HotlineProtocolEngine {
             // Text-encoding negotiation (fogWraith CAPABILITY_TEXT_ENCODING):
             // only the login reply carries `.capabilities`. If the server
             // echoes the textEncoding bit, flip inbound decoding to UTF-8 for
-            // every push AFTER this reply. Done here — before resuming the
-            // continuation — and serially on the actor, so there's no window
-            // where a later push is decoded with the stale encoding. The
-            // login reply itself was already decoded above (still macOS
-            // Roman, as intended). Flipping to .utf8 is idempotent.
-            if CapabilityFlags.negotiatedTextEncoding(echoed: fields.uint16(.capabilities)) {
-                stringEncoding = .utf8
-            }
+            // every push AFTER this reply.
+            let flipToUTF8 = CapabilityFlags.negotiatedTextEncoding(echoed: fields.uint16(.capabilities))
             if header.errorID != 0 {
+                // Decode THIS reply's own error message with the current
+                // (pre-flip) encoding — the login reply itself stays macOS
+                // Roman, as intended.
                 let message = fields.string(.errorMessage, encoding: stringEncoding)
                 let typed = HotlineError.fromWire(
                     errorID: header.errorID,
@@ -190,6 +187,12 @@ public actor HotlineProtocolEngine {
                 continuation.resume(throwing: typed)
             } else {
                 continuation.resume(returning: fields)
+            }
+            // Flip AFTER this reply is fully processed, before the next packet.
+            // dispatch is serial on the actor, so no later push is decoded with
+            // the stale encoding. Flipping to .utf8 is idempotent.
+            if flipToUTF8 {
+                stringEncoding = .utf8
             }
             return
         }
