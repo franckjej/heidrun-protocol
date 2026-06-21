@@ -31,7 +31,14 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             #expect(loginPacket.header.transactionID == 107)
+            // Nickname is no longer in the login packet.
+            #expect(loginPacket.fields.string(.nickname) == nil)
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            // Post-login TX 304 carries the nickname (no encoding negotiated
+            // here, so still macOS Roman).
+            let nickPacket = try await conn.drainPostLoginNick()
+            #expect(nickPacket.header.transactionID == 304)
+            #expect(nickPacket.fields.string(.nickname) == "Spirit")
             let chatPacket = try await conn.readPacket()
             #expect(chatPacket.header.transactionID == 105)
             #expect(chatPacket.fields.string(.message) == "hello from NIO")
@@ -46,6 +53,38 @@ struct NIOHotlineClientIntegrationTests {
         await client.disconnect()
     }
 
+    /// When the server echoes `CapabilityFlags.textEncoding`, the NIO client
+    /// flips its outbound encoding to UTF-8 before sending the post-login
+    /// nickname (TX 304). Login request + reply stay legacy.
+    @Test("negotiated textEncoding sends the post-login nick as UTF-8")
+    func textEncodingFlipsPostLoginNick() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        let accentedNick = "café"
+
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            #expect(loginPacket.fields.string(.nickname) == nil)
+            try await conn.sendReply(
+                transactionID: 107,
+                taskNumber: loginPacket.header.taskNumber,
+                fields: [.uint16(.capabilities, CapabilityFlags.textEncoding.rawValue)]
+            )
+            let nickPacket = try await conn.drainPostLoginNick()
+            #expect(nickPacket.header.transactionID == 304)
+            #expect(nickPacket.fields.string(.nickname, encoding: .utf8) == accentedNick)
+            #expect(nickPacket.fields.first(.nickname)?.data == accentedNick.data(using: .utf8))
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: accentedNick, icon: 1, emoji: nil)
+        try await serverSide
+        await client.disconnect()
+    }
+
     @Test("login advertises capabilities and enables large files when echoed")
     func largeFilesNegotiatedOn() async throws {
         let server = try await LoopbackServer.start()
@@ -54,11 +93,14 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             #expect(loginPacket.fields.uint16(.capabilities) == CapabilityFlags.supported.rawValue)
+            // Nickname moved out of the login packet (sent post-login via 304).
+            #expect(loginPacket.fields.string(.nickname) == nil)
             try await conn.sendReply(
                 transactionID: 107,
                 taskNumber: loginPacket.header.taskNumber,
                 fields: [.uint16(.capabilities, CapabilityFlags.largeFiles.rawValue)]
             )
+            try await conn.drainPostLoginNick()
         }()
 
         let client = try await NIOHotlineClient.connect(
@@ -79,6 +121,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
         }()
 
         let client = try await NIOHotlineClient.connect(
@@ -99,6 +142,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             try await conn.sendPush(transactionID: 106, fields: [   // 106 = relayChat
                 .string(.message, " Bob: hi there", encoding: .macOSRoman)
             ])
@@ -127,6 +171,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let infoPacket = try await conn.readPacket()
             #expect(infoPacket.header.transactionID == 303)
             #expect(infoPacket.fields.uint16(.socket) == 42)
@@ -165,6 +210,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let pmPacket = try await conn.readPacket()
             #expect(pmPacket.header.transactionID == 108)
             #expect(pmPacket.fields.uint16(.socket) == 42)
@@ -189,6 +235,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let agreePacket = try await conn.readPacket()
             #expect(agreePacket.header.transactionID == 121)
             #expect(agreePacket.fields.string(.nickname) == "Tester")
@@ -212,6 +259,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let lsPacket = try await conn.readPacket()
             #expect(lsPacket.header.transactionID == 200)
             // RemotePath is encoded as a single .filePath blob — easiest
@@ -250,6 +298,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let infoPacket = try await conn.readPacket()
             #expect(infoPacket.header.transactionID == 206)
             #expect(infoPacket.fields.string(.fileName) == "image.jpg")
@@ -288,6 +337,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let newsPacket = try await conn.readPacket()
             #expect(newsPacket.header.transactionID == 101)
             try await conn.sendReply(
@@ -315,6 +365,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let postPacket = try await conn.readPacket()
             #expect(postPacket.header.transactionID == 103)
             #expect(postPacket.fields.string(.message) == "stage-1 lives")
@@ -338,6 +389,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let delPacket = try await conn.readPacket()
             #expect(delPacket.header.transactionID == 204)
             #expect(delPacket.fields.string(.fileName) == "junk.txt")
@@ -362,6 +414,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let mkPacket = try await conn.readPacket()
             #expect(mkPacket.header.transactionID == 205)
             #expect(mkPacket.fields.string(.fileName) == "New Folder")
@@ -386,6 +439,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let mvPacket = try await conn.readPacket()
             #expect(mvPacket.header.transactionID == 208)
             #expect(mvPacket.fields.string(.fileName) == "report.pdf")
@@ -415,6 +469,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let bundlesPacket = try await conn.readPacket()
             #expect(bundlesPacket.header.transactionID == 370)
             #expect(bundlesPacket.fields.first(.newsPath) != nil)
@@ -449,6 +504,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let threadsPacket = try await conn.readPacket()
             #expect(threadsPacket.header.transactionID == 371)
             let entries = [
@@ -482,6 +538,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             // Server-pushed broadcast — inbound, no matching reply.
             try await conn.sendPush(transactionID: 355, fields: [
                 .string(.message, "hello", encoding: .macOSRoman)
@@ -522,6 +579,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             // Server-class ping with a non-zero task number so we can
             // assert the client echoes it back on its reply.
             try await conn.sendPush(transactionID: 500, taskNumber: 4242)
@@ -557,6 +615,7 @@ struct NIOHotlineClientIntegrationTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let threadPacket = try await conn.readPacket()
             #expect(threadPacket.header.transactionID == 400)
             #expect(threadPacket.fields.uint16(.newsArticleID) == 7)

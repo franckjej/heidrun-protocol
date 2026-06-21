@@ -17,7 +17,12 @@ public actor NIOHotlineClient {
     /// `broadcaster.finish()` in NIO's tearDown was what broke auto-
     /// reconnect on Linux). One engine, one place to fix bugs.
     private nonisolated let engine: HotlineProtocolEngine
-    private let stringEncoding: String.Encoding
+    /// Outbound string encoding. Flips from macOS Roman to UTF-8 after the
+    /// login reply when the server echoes `CapabilityFlags.textEncoding`
+    /// (fogWraith). Actor-isolated, written only in `login` after the reply
+    /// is decoded — no race with concurrent sends. The engine flips its own
+    /// inbound decode independently on the same reply.
+    private var stringEncoding: String.Encoding
     private let settings: ConnectionSettings
 
     private var connectionSocket: UInt16 = 0
@@ -108,10 +113,12 @@ public actor NIOHotlineClient {
 
     public func login(name: String, password: String, nickname: String,
                       icon: UInt16, emoji: String?) async throws {
+        // Nickname is NOT in the login packet. It's sent post-login via
+        // TX 304 (gtkhx-style) so it ships in the negotiated encoding. Login
+        // request + reply stay legacy (macOS Roman) on both sides.
         var fields: [PacketField] = [
             .obfuscatedString(.login, name, encoding: stringEncoding),
             .obfuscatedString(.password, password, encoding: stringEncoding),
-            .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
             .uint16(.clientVersion, 151),
             .uint8(.resourceForkSupport, 1),
@@ -124,6 +131,19 @@ public actor NIOHotlineClient {
         // Capability negotiation (Heidrun extension 0xE002).
         serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
         largeFilesEnabled = CapabilityFlags.negotiatedLargeFiles(echoed: reply.uint16(.capabilities))
+        // Text-encoding negotiation (fogWraith CAPABILITY_TEXT_ENCODING):
+        // flip outbound to UTF-8 BEFORE sending the post-login nickname so
+        // the nick goes out in the negotiated encoding.
+        if CapabilityFlags.negotiatedTextEncoding(echoed: reply.uint16(.capabilities)) {
+            stringEncoding = .utf8
+        }
+        // Send the nickname now (TX 304) — mirrors changeNickname's fields,
+        // encoded with the now-possibly-flipped stringEncoding.
+        try await send(transactionID: 304, fields: [
+            .string(.nickname, nickname, encoding: stringEncoding),
+            .uint16(.icon, icon == 0 ? 1 : icon),
+            .string(.userEmoji, emoji ?? "", encoding: .utf8)
+        ], expectsReply: false)
     }
 
     public func sendChat(_ message: String, in chat: ChatID?, isAction: Bool) async throws {

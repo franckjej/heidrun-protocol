@@ -135,6 +135,14 @@ final class ServerConnection: @unchecked Sendable {
         return ReceivedPacket(header: header, fields: PacketCodec.decodeBody(body))
     }
 
+    /// Read and discard the post-login nickname (TX 304) the client now
+    /// sends right after the login reply (nickname moved out of the login
+    /// packet, gtkhx-style). Returns the packet so callers can assert on it.
+    @discardableResult
+    func drainPostLoginNick() async throws -> ReceivedPacket {
+        try await readPacket()
+    }
+
     func sendReply(
         transactionID: UInt16,
         taskNumber: UInt32,
