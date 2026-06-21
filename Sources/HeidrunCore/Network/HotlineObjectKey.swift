@@ -44,10 +44,26 @@ public enum HotlineObjectKey: UInt16, Sendable, Hashable, CaseIterable {
     case destinationPath    = 212
     case folderItemCount    = 220   // upload-folder reply / request (UInt16)
 
+    /// **Heidrun extension** (CAPABILITY_LARGE_FILES). UInt16 bitmask of
+    /// negotiated protocol capabilities (see `CapabilityFlags`).
+    case capabilities       = 0x01F0
+
     /// **Heidrun extension** (CAPABILITY_LARGE_FILES). 64-bit file size,
     /// sent alongside the legacy 32-bit `fileSize` (207) in a file-list
     /// entry so large files (> 4 GiB) report their true size.
     case fileSize64         = 0x01F1
+
+    /// **Heidrun extension** (CAPABILITY_LARGE_FILES). 64-bit resume
+    /// offset for large-file transfers.
+    case offset64           = 0x01F2
+
+    /// **Heidrun extension** (CAPABILITY_LARGE_FILES). 64-bit transfer
+    /// size for large-file transfers.
+    case xferSize64         = 0x01F3
+
+    /// **Heidrun extension** (CAPABILITY_LARGE_FILES). Reserved — 64-bit
+    /// folder item count (not yet implemented).
+    case folderItemCount64  = 0x01F4
 
     case userListEntry      = 300
 
