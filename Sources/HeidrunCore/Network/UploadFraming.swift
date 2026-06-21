@@ -272,6 +272,7 @@ public enum UploadFraming {
             throw DecodeError.missingMagic("DATA")
         }
         let dataLength = UploadFraming.forkLength(from: dataHeader)
+        guard dataLength <= UInt64(Int.max) else { throw DecodeError.truncated }
         let fork = try readBytes(Int(dataLength))
 
         try need(16)
@@ -280,6 +281,7 @@ public enum UploadFraming {
             throw DecodeError.missingMagic("MACR")
         }
         let resourceLength = UploadFraming.forkLength(from: resourceHeader)
+        guard resourceLength <= UInt64(Int.max) else { throw DecodeError.truncated }
         let resourceFork = resourceLength > 0 ? try readBytes(Int(resourceLength)) : Data()
 
         return UploadEnvelope(
