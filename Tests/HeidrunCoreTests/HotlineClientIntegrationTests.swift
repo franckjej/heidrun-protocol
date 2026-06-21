@@ -62,21 +62,23 @@ struct HotlineClientIntegrationTests {
         let sc = try await serverConnTask
 
         async let serverWork: Void = {
-            // Login packet: nickname is NO LONGER in here (it moves out,
-            // gtkhx-style, and is sent post-login via TX 304 so it goes out
-            // in the negotiated encoding).
+            // Option 2: the nickname rides IN the login packet again. The
+            // client always advertises CAPABILITY_TEXT_ENCODING, so the nick
+            // is UTF-8-encoded; "Heidrun" is ASCII so it round-trips either
+            // way and reads back under macOS Roman too.
             let packet = try await sc.readPacket()
             #expect(packet.header.transactionID == 107)
             #expect(packet.header.errorID == 0)
 
             let login    = packet.fields.obfuscatedString(.login)
             let password = packet.fields.obfuscatedString(.password)
+            let nickname = packet.fields.string(.nickname, encoding: .utf8)
             let icon     = packet.fields.uint16(.icon)
             let version  = packet.fields.uint16(.clientVersion)
 
             #expect(login    == "jens")
             #expect(password == "hunter2")
-            #expect(packet.fields.string(.nickname) == nil)
+            #expect(nickname == "Heidrun")
             #expect(icon     == 42)
             #expect(version  == 151)
 
@@ -85,13 +87,6 @@ struct HotlineClientIntegrationTests {
                 taskNumber: packet.header.taskNumber,
                 fields: [.uint16(.clientVersion, 199)]
             )
-
-            // Post-login TX 304 carries the nickname. No textEncoding was
-            // negotiated (the reply omitted .capabilities), so it stays
-            // macOS Roman.
-            let nickPacket = try await sc.readPacket()
-            #expect(nickPacket.header.transactionID == 304)
-            #expect(nickPacket.fields.string(.nickname) == "Heidrun")
         }()
 
         try await client.login(
@@ -106,11 +101,13 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
-    /// When the server echoes `CapabilityFlags.textEncoding` on the login
-    /// reply, the client flips its outbound encoding to UTF-8 BEFORE sending
-    /// the post-login nickname (TX 304). Login request + reply stay legacy.
-    @Test("negotiated textEncoding sends the post-login nick as UTF-8")
-    func textEncodingFlipsPostLoginNick() async throws {
+    /// Option 2: the client always advertises CAPABILITY_TEXT_ENCODING, so the
+    /// nickname rides IN the login(107) packet UTF-8-encoded. A non-ASCII nick
+    /// must therefore arrive as UTF-8 bytes in the login packet — no post-login
+    /// TX 304. (The server decodes the login nick as UTF-8 when the login
+    /// caps include textEncoding.)
+    @Test("login packet carries the nickname UTF-8-encoded")
+    func loginNickIsUTF8InLoginPacket() async throws {
         let server = try await MiniHotlineServer.start()
         defer { server.stop() }
 
@@ -127,21 +124,21 @@ struct HotlineClientIntegrationTests {
         async let serverWork: Void = {
             let loginPacket = try await sc.readPacket()
             #expect(loginPacket.header.transactionID == 107)
-            #expect(loginPacket.fields.string(.nickname) == nil)
+            // The client advertises textEncoding in its login caps.
+            let advertised = loginPacket.fields.uint16(.capabilities) ?? 0
+            #expect(advertised & CapabilityFlags.textEncoding.rawValue != 0)
+            // Nickname rides in the login packet, UTF-8-encoded.
+            #expect(loginPacket.fields.string(.nickname, encoding: .utf8) == accentedNick)
+            // And the raw bytes must be the UTF-8 form (é = 0xC3 0xA9),
+            // not the single-byte macOS Roman form.
+            let rawNick = loginPacket.fields.first(.nickname)?.data
+            #expect(rawNick == accentedNick.data(using: .utf8))
             // Echo the textEncoding capability bit on the reply.
             try await sc.sendReply(
                 transactionID: loginPacket.header.transactionID,
                 taskNumber: loginPacket.header.taskNumber,
                 fields: [.uint16(.capabilities, CapabilityFlags.textEncoding.rawValue)]
             )
-            // Post-login TX 304: nickname must decode as UTF-8.
-            let nickPacket = try await sc.readPacket()
-            #expect(nickPacket.header.transactionID == 304)
-            #expect(nickPacket.fields.string(.nickname, encoding: .utf8) == accentedNick)
-            // And the raw bytes must be the UTF-8 form (é = 0xC3 0xA9),
-            // not the single-byte macOS Roman form.
-            let rawNick = nickPacket.fields.first(.nickname)?.data
-            #expect(rawNick == accentedNick.data(using: .utf8))
         }()
 
         try await client.login(
