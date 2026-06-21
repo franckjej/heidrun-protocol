@@ -32,6 +32,12 @@ public struct PacketField: Sendable, Hashable {
         return PacketField(key: key, data: data)
     }
 
+    public static func uint64(_ key: HotlineObjectKey, _ value: UInt64) -> PacketField {
+        var data = Data()
+        data.appendBigEndian(value)
+        return PacketField(key: key, data: data)
+    }
+
     /// String field encoded with the supplied encoding (default Mac Roman,
     /// matching the original Heidrun build's preference).
     public static func string(
@@ -138,6 +144,13 @@ extension Sequence where Element == PacketField {
         guard let field = first(key) else { return nil }
         var cursor = ByteCursor(data: field.data)
         guard cursor.remaining >= 4 else { return nil }
+        return cursor.readBigEndian()
+    }
+
+    public func uint64(_ key: HotlineObjectKey) -> UInt64? {
+        guard let field = first(key) else { return nil }
+        var cursor = ByteCursor(data: field.data)
+        guard cursor.remaining >= 8 else { return nil }
         return cursor.readBigEndian()
     }
 
