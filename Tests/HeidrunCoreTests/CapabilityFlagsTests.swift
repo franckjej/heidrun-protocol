@@ -33,4 +33,29 @@ struct CapabilityFlagsTests {
         #expect(!CapabilityFlags.negotiatedLargeFiles(echoed: 0x0000))
         #expect(!CapabilityFlags.negotiatedLargeFiles(echoed: 0x0002))
     }
+
+    @Test("textEncoding is bit 0x0002")
+    func textEncodingBit() {
+        #expect(CapabilityFlags.textEncoding.rawValue == 0x0002)
+    }
+
+    @Test("supported advertises both largeFiles and textEncoding")
+    func supportedSet() {
+        #expect(CapabilityFlags.supported.contains(.largeFiles))
+        #expect(CapabilityFlags.supported.contains(.textEncoding))
+        #expect(CapabilityFlags.supported == [.largeFiles, .textEncoding])
+    }
+
+    @Test("negotiatedTextEncoding is true when the server echoes the bit")
+    func negotiatedTextEncodingTrue() {
+        #expect(CapabilityFlags.negotiatedTextEncoding(echoed: 0x0002))
+        #expect(CapabilityFlags.negotiatedTextEncoding(echoed: 0x0003))
+    }
+
+    @Test("negotiatedTextEncoding is false when absent or unset")
+    func negotiatedTextEncodingFalse() {
+        #expect(!CapabilityFlags.negotiatedTextEncoding(echoed: nil))
+        #expect(!CapabilityFlags.negotiatedTextEncoding(echoed: 0x0000))
+        #expect(!CapabilityFlags.negotiatedTextEncoding(echoed: 0x0001))
+    }
 }
