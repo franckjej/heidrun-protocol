@@ -62,19 +62,21 @@ struct HotlineClientIntegrationTests {
         let sc = try await serverConnTask
 
         async let serverWork: Void = {
+            // Login packet: nickname is NO LONGER in here (it moves out,
+            // gtkhx-style, and is sent post-login via TX 304 so it goes out
+            // in the negotiated encoding).
             let packet = try await sc.readPacket()
             #expect(packet.header.transactionID == 107)
             #expect(packet.header.errorID == 0)
 
             let login    = packet.fields.obfuscatedString(.login)
             let password = packet.fields.obfuscatedString(.password)
-            let nickname = packet.fields.string(.nickname)
             let icon     = packet.fields.uint16(.icon)
             let version  = packet.fields.uint16(.clientVersion)
 
             #expect(login    == "jens")
             #expect(password == "hunter2")
-            #expect(nickname == "Heidrun")
+            #expect(packet.fields.string(.nickname) == nil)
             #expect(icon     == 42)
             #expect(version  == 151)
 
@@ -83,6 +85,13 @@ struct HotlineClientIntegrationTests {
                 taskNumber: packet.header.taskNumber,
                 fields: [.uint16(.clientVersion, 199)]
             )
+
+            // Post-login TX 304 carries the nickname. No textEncoding was
+            // negotiated (the reply omitted .capabilities), so it stays
+            // macOS Roman.
+            let nickPacket = try await sc.readPacket()
+            #expect(nickPacket.header.transactionID == 304)
+            #expect(nickPacket.fields.string(.nickname) == "Heidrun")
         }()
 
         try await client.login(
@@ -90,6 +99,53 @@ struct HotlineClientIntegrationTests {
             password: "hunter2",
             nickname: "Heidrun",
             icon: 42
+        )
+        try await serverWork
+
+        await client.disconnect()
+        sc.close()
+    }
+
+    /// When the server echoes `CapabilityFlags.textEncoding` on the login
+    /// reply, the client flips its outbound encoding to UTF-8 BEFORE sending
+    /// the post-login nickname (TX 304). Login request + reply stay legacy.
+    @Test("negotiated textEncoding sends the post-login nick as UTF-8")
+    func textEncodingFlipsPostLoginNick() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(name: "test", address: "127.0.0.1", port: server.port)
+        )
+        let sc = try await serverConnTask
+
+        // A nickname with a character that round-trips differently under
+        // macOS Roman vs UTF-8 (U+00E9 é). UTF-8 encodes it as two bytes.
+        let accentedNick = "café"
+
+        async let serverWork: Void = {
+            let loginPacket = try await sc.readPacket()
+            #expect(loginPacket.header.transactionID == 107)
+            #expect(loginPacket.fields.string(.nickname) == nil)
+            // Echo the textEncoding capability bit on the reply.
+            try await sc.sendReply(
+                transactionID: loginPacket.header.transactionID,
+                taskNumber: loginPacket.header.taskNumber,
+                fields: [.uint16(.capabilities, CapabilityFlags.textEncoding.rawValue)]
+            )
+            // Post-login TX 304: nickname must decode as UTF-8.
+            let nickPacket = try await sc.readPacket()
+            #expect(nickPacket.header.transactionID == 304)
+            #expect(nickPacket.fields.string(.nickname, encoding: .utf8) == accentedNick)
+            // And the raw bytes must be the UTF-8 form (é = 0xC3 0xA9),
+            // not the single-byte macOS Roman form.
+            let rawNick = nickPacket.fields.first(.nickname)?.data
+            #expect(rawNick == accentedNick.data(using: .utf8))
+        }()
+
+        try await client.login(
+            name: "jens", password: "hunter2", nickname: accentedNick, icon: 5
         )
         try await serverWork
 

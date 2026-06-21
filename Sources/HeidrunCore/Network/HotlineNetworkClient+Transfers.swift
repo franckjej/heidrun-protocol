@@ -551,7 +551,7 @@ extension HotlineNetworkClient {
                             buffer.append(chunk)
                             if buffer.count >= Int(handle.totalSize) { break }
                         }
-                        let encoding = self.stringEncoding
+                        let encoding = await self.stringEncoding
                         let envelope = try UploadFraming.decode(buffer, encoding: encoding)
                         // Stash the resource fork so `consumeResourceFork`
                         // can hand it to the caller after the stream
@@ -609,7 +609,7 @@ extension HotlineNetworkClient {
                     continuation.finish(throwing: HotlineError.notConnected)
                     return
                 }
-                let encoding = self.stringEncoding
+                let encoding = await self.stringEncoding
                 let largeFile = await self.largeFilesEnabled
                 await FolderDownloadDecoder.drive(
                     actor: actor,
