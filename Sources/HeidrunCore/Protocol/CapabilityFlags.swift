@@ -15,4 +15,12 @@ public struct CapabilityFlags: OptionSet, Sendable, Hashable {
 
     /// The capabilities this build supports and advertises.
     public static let supported: CapabilityFlags = [.largeFiles]
+
+    /// Decide whether large-file mode is active for this session, given the
+    /// `capabilities` value (field 0x01F0) the server echoed on the login
+    /// reply (`nil` when the field was absent). Used by both clients to set
+    /// their `largeFilesEnabled` flag after `login`.
+    public static func negotiatedLargeFiles(echoed: UInt16?) -> Bool {
+        CapabilityFlags(rawValue: echoed ?? 0).contains(.largeFiles)
+    }
 }

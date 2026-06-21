@@ -26,6 +26,11 @@ public actor NIOHotlineClient {
     /// When set, single-file downloads ship the FILP envelope.
     public private(set) var serverSupportsResourceForks: Bool = false
 
+    /// `true` after the server echoed `.capabilities` with the
+    /// `.largeFiles` bit set on the 107 login reply. When set, transfers
+    /// over 4 GiB use the 24-byte HTXF handshake + 64-bit size fields.
+    public private(set) var largeFilesEnabled: Bool = false
+
     private init(engine: HotlineProtocolEngine, settings: ConnectionSettings,
                  stringEncoding: String.Encoding) {
         self.engine = engine
@@ -109,7 +114,8 @@ public actor NIOHotlineClient {
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
             .uint16(.clientVersion, 151),
-            .uint8(.resourceForkSupport, 1)
+            .uint8(.resourceForkSupport, 1),
+            .uint16(.capabilities, CapabilityFlags.supported.rawValue)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         let reply = try await send(transactionID: 107, fields: fields, expectsReply: true)
@@ -117,6 +123,7 @@ public actor NIOHotlineClient {
         if let socket = reply.uint16(.socket) { connectionSocket = socket }
         // Capability negotiation (Heidrun extension 0xE002).
         serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
+        largeFilesEnabled = CapabilityFlags.negotiatedLargeFiles(echoed: reply.uint16(.capabilities))
     }
 
     public func sendChat(_ message: String, in chat: ChatID?, isAction: Bool) async throws {

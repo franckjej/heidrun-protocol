@@ -46,6 +46,51 @@ struct NIOHotlineClientIntegrationTests {
         await client.disconnect()
     }
 
+    @Test("login advertises capabilities and enables large files when echoed")
+    func largeFilesNegotiatedOn() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            #expect(loginPacket.fields.uint16(.capabilities) == CapabilityFlags.supported.rawValue)
+            try await conn.sendReply(
+                transactionID: 107,
+                taskNumber: loginPacket.header.taskNumber,
+                fields: [.uint16(.capabilities, CapabilityFlags.largeFiles.rawValue)]
+            )
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Spirit", icon: 1, emoji: nil)
+        try await serverSide
+        let enabled = await client.largeFilesEnabled
+        #expect(enabled)
+        await client.disconnect()
+    }
+
+    @Test("large files stays off when the server omits the capability echo")
+    func largeFilesNegotiatedOff() async throws {
+        let server = try await LoopbackServer.start()
+        defer { server.stop() }
+        async let serverSide: Void = {
+            let conn = try await server.acceptHandshake()
+            let loginPacket = try await conn.readPacket()
+            try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+        }()
+
+        let client = try await NIOHotlineClient.connect(
+            settings: ConnectionSettings(name: "t", address: "127.0.0.1", port: server.port)
+        )
+        try await client.login(name: "j", password: "p", nickname: "Spirit", icon: 1, emoji: nil)
+        try await serverSide
+        let enabled = await client.largeFilesEnabled
+        #expect(!enabled)
+        await client.disconnect()
+    }
+
     @Test("emits chatReceived for a server-pushed relayChat")
     func receivesChat() async throws {
         let server = try await LoopbackServer.start()

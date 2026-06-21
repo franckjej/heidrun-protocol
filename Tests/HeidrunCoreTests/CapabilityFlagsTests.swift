@@ -20,4 +20,17 @@ struct CapabilityFlagsTests {
         let flags: CapabilityFlags = [.largeFiles]
         #expect(flags.rawValue == 1)
     }
+
+    @Test("negotiatedLargeFiles is true when the server echoes the bit")
+    func negotiatedTrue() {
+        #expect(CapabilityFlags.negotiatedLargeFiles(echoed: 0x0001))
+        #expect(CapabilityFlags.negotiatedLargeFiles(echoed: 0x0003))
+    }
+
+    @Test("negotiatedLargeFiles is false when absent or unset")
+    func negotiatedFalse() {
+        #expect(!CapabilityFlags.negotiatedLargeFiles(echoed: nil))
+        #expect(!CapabilityFlags.negotiatedLargeFiles(echoed: 0x0000))
+        #expect(!CapabilityFlags.negotiatedLargeFiles(echoed: 0x0002))
+    }
 }

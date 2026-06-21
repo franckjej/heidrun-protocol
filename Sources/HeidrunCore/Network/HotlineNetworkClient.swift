@@ -38,6 +38,10 @@ public actor HotlineNetworkClient: HotlineClient {
     /// 107 login reply. When set, single-file downloads ship the
     /// FILP/INFO/DATA/MACR envelope and carry the resource fork.
     public private(set) var serverSupportsResourceForks: Bool = false
+    /// `true` after the server echoed `.capabilities` with the
+    /// `.largeFiles` bit set on the 107 login reply. When set, transfers
+    /// over 4 GiB use the 24-byte HTXF handshake + 64-bit size fields.
+    public private(set) var largeFilesEnabled: Bool = false
     var activeTransfers: [UInt32: FileTransferActor] = [:]
     /// Resource-fork bytes recovered from a framed `downloadStream`
     /// after the FILP envelope has been decoded. Persists past the
@@ -276,7 +280,8 @@ public actor HotlineNetworkClient: HotlineClient {
             .string(.nickname, nickname, encoding: stringEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
             .uint16(.clientVersion, UInt16(clientVersion)),
-            .uint8(.resourceForkSupport, 1)
+            .uint8(.resourceForkSupport, 1),
+            .uint16(.capabilities, CapabilityFlags.supported.rawValue)
         ]
         if let emoji { fields.append(.string(.userEmoji, emoji, encoding: .utf8)) }
         let reply = try await sendExpectingReply(transactionID: 107, fields: fields)
@@ -293,6 +298,7 @@ public actor HotlineNetworkClient: HotlineClient {
         // only echoes the field when it actually supports the framed
         // single-file download path. No echo = fall back to raw bytes.
         self.serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
+        self.largeFilesEnabled = CapabilityFlags.negotiatedLargeFiles(echoed: reply.uint16(.capabilities))
         // Start the heartbeat now that the server has authenticated us.
         // Pre-login pings would either be ignored or treated as a
         // protocol violation depending on the server.
