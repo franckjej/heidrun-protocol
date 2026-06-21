@@ -16,6 +16,16 @@ struct UploadFramingTests {
         #expect(UploadFraming.totalSize(nameLength: 8, dataLength: 1024) == 1178)
     }
 
+    @Test("totalSize handles a data fork larger than 4 GiB without trapping")
+    func totalSizeLargeFile() {
+        // 8-char name, 4 GiB + 1 data fork (0x1_0000_0000), no resource.
+        // Total = 40 + (74 + 8) + 16 + 0x1_0000_0000 + 16 = 0x1_0000_009E.
+        let expected: UInt64 = 0x1_0000_0000 + UInt64(40 + 82 + 16 + 16)
+        #expect(
+            UploadFraming.totalSize(nameLength: 8, dataLength: 0x1_0000_0000) == expected
+        )
+    }
+
     @Test("encoded payload starts with FILP and ends with MACR + length")
     func encodedFraming() {
         let payload = UploadFraming.encode(

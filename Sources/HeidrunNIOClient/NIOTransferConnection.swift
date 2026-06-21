@@ -116,11 +116,12 @@ enum NIOTransferConnection {
         progress: (@Sendable (UInt64, UInt64) async -> Void)?
     ) async throws {
         let nameBytes = fileName.data(using: encoding, allowLossyConversion: true) ?? Data()
-        let totalSize = UploadFraming.totalSize(
+        // `fileSize` is a UInt32 here, so the total fits the UInt32 handshake.
+        let totalSize = UInt32(clamping: UploadFraming.totalSize(
             nameLength: nameBytes.count,
-            dataLength: fileSize,
-            resourceLength: UInt32(resourceFork.count)
-        )
+            dataLength: UInt64(fileSize),
+            resourceLength: UInt64(resourceFork.count)
+        ))
         let prefix = UploadFraming.encodePrefix(
             fileName: fileName,
             type: type, creator: creator,

@@ -82,10 +82,10 @@ public enum UploadFraming {
     /// handshake (which is sent separately).
     public static func totalSize(
         nameLength: Int,
-        dataLength: UInt32,
-        resourceLength: UInt32 = 0
-    ) -> UInt32 {
-        let info = UInt32(74 + nameLength)
+        dataLength: UInt64,
+        resourceLength: UInt64 = 0
+    ) -> UInt64 {
+        let info = UInt64(74 + nameLength)
         return 40 + info + 16 + dataLength + 16 + resourceLength
     }
 
