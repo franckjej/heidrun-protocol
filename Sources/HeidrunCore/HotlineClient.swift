@@ -393,11 +393,12 @@ public protocol HotlineClient: Sendable {
         resume: Bool
     ) async throws -> TransferHandle
 
-    /// Begin uploading a folder.
+    /// Begin uploading a folder. `size` is the folder's total payload in
+    /// bytes; it may exceed 4 GiB when the session negotiated large files.
     func startFolderUpload(
         at path: RemotePath,
         name: String,
-        size: UInt32,
+        size: UInt64,
         itemCount: UInt16,
         resume: Bool
     ) async throws -> TransferHandle

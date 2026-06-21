@@ -40,6 +40,40 @@ struct FileTransferLargeFileTests {
         #expect(smallFields.uint32(.transferSize) == 1234)
     }
 
+    @Test("folderUploadRequestFields appends xferSize64 only for a >4 GiB folder in large-file mode")
+    func folderUploadRequestFieldsLargeFile() {
+        let hugeSize: UInt64 = 0x1_2345_6789
+        let largeFields = HotlineNetworkClient.folderUploadRequestFields(
+            path: RemotePath(),
+            name: "huge-folder",
+            size: hugeSize,
+            itemCount: 3,
+            resume: false,
+            largeFile: true,
+            encoding: .macOSRoman
+        )
+        #expect(largeFields.uint64(.xferSize64) == hugeSize)
+        // Legacy field is clamped to 32 bits; item count rides along.
+        #expect(largeFields.uint32(.transferSize) == 0xFFFF_FFFF)
+        #expect(largeFields.uint16(.folderItemCount) == 3)
+    }
+
+    @Test("folderUploadRequestFields omits xferSize64 on the legacy path")
+    func folderUploadRequestFieldsLegacy() {
+        let smallFields = HotlineNetworkClient.folderUploadRequestFields(
+            path: RemotePath(),
+            name: "folder",
+            size: 4096,
+            itemCount: 2,
+            resume: false,
+            largeFile: false,
+            encoding: .macOSRoman
+        )
+        #expect(smallFields.uint64(.xferSize64) == nil)
+        #expect(smallFields.uint32(.transferSize) == 4096)
+        #expect(smallFields.uint16(.folderItemCount) == 2)
+    }
+
     /// Mirrors `sendUpload`'s large-file body path: a 24-byte handshake
     /// followed by raw data-fork bytes, no FILP/INFO/DATA/MACR envelope.
     @Test("large-file upload sends a 24-byte preamble + raw body (no FFO magic)")

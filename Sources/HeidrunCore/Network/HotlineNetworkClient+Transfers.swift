@@ -85,18 +85,21 @@ extension HotlineNetworkClient {
         guard let transferID = reply.uint32(.transferID) else {
             throw HotlineError.malformedReply(reason: "missing transferID")
         }
-        let totalSize = reply.uint32(.transferSize) ?? 0
+        // Prefer the 64-bit folder size when the server sends it; fall back
+        // to the legacy 32-bit field otherwise.
+        let totalSize = reply.uint64(.xferSize64)
+            ?? UInt64(reply.uint32(.transferSize) ?? 0)
 
         // Open the side channel with the 18-byte folder-download
         // handshake. Drive the per-item header / FILP / INFO / DATA /
         // MACR stream with `folderDownloadStream(for:)`.
         let actor = try await openFolderSideChannel(
             transferID: transferID,
-            totalSize: UInt64(totalSize),
+            totalSize: totalSize,
             isDownload: true
         )
         activeTransfers[transferID] = actor
-        return TransferHandle(transferID: transferID, totalSize: UInt64(totalSize))
+        return TransferHandle(transferID: transferID, totalSize: totalSize)
     }
 
     /// Assemble the TX 203 (uploadFile) request fields. Pure so the
@@ -181,10 +184,13 @@ extension HotlineNetworkClient {
         }
 
         let nameBytes = fileName.data(using: stringEncoding, allowLossyConversion: true) ?? Data()
+        // Non-large-file single-file path: the data fork is ≤4 GiB here
+        // (large files take the `isLargeFile` branch above), so the total
+        // fits a UInt32 handshake.
         let total = UploadFraming.totalSize(
             nameLength: nameBytes.count,
-            dataLength: UInt32(content.count),
-            resourceLength: UInt32(resourceFork.count)
+            dataLength: UInt64(content.count),
+            resourceLength: UInt64(resourceFork.count)
         )
 
         // Re-send the HTXF handshake with the now-known total size. The
@@ -192,7 +198,7 @@ extension HotlineNetworkClient {
         // the original Heidrun also opens with `xFerSize=0` and the
         // server tolerates either flow. Be explicit anyway.
         try await actor.sendBytes(
-            TransferHandshake.encode(transferID: handle.transferID, transferSize: total)
+            TransferHandshake.encode(transferID: handle.transferID, transferSize: UInt32(clamping: total))
         )
 
         // FILP + INFO + DATA hdr, then data-fork bytes in chunks (so
@@ -246,10 +252,39 @@ extension HotlineNetworkClient {
         try await actor.finishUpload()
     }
 
+    /// Assemble the TX 213 (uploadFolder) request fields. Pure so the
+    /// large-file dialect can be unit-tested without a side channel.
+    /// `largeFile` true ⇒ a `.uint64(.xferSize64, size)` field is appended
+    /// after the clamped legacy `transferSize`; false ⇒ byte-identical to
+    /// the pre-large-files request.
+    static func folderUploadRequestFields(
+        path: RemotePath,
+        name: String,
+        size: UInt64,
+        itemCount: UInt16,
+        resume: Bool,
+        largeFile: Bool,
+        encoding: String.Encoding
+    ) -> [PacketField] {
+        var fields: [PacketField] = [
+            .path(.filePath, path, encoding: encoding),
+            .string(.fileName, name, encoding: encoding),
+            .uint32(.transferSize, UInt32(clamping: size)),
+            .uint16(.folderItemCount, itemCount)
+        ]
+        if largeFile {
+            fields.append(.uint64(.xferSize64, size))
+        }
+        if resume {
+            fields.append(.uint16(.folderResumeFlag, 1))
+        }
+        return fields
+    }
+
     public func startFolderUpload(
         at path: RemotePath,
         name: String,
-        size: UInt32,
+        size: UInt64,
         itemCount: UInt16,
         resume: Bool
     ) async throws -> TransferHandle {
@@ -257,15 +292,16 @@ extension HotlineNetworkClient {
         // Fields per HEClient.m line 1860+:
         //   filePath(202), folderName(201), folderSize(108)=size,
         //   itemCount(220)=itemCount, optional folderResumeFlag(204)=1.
-        var fields: [PacketField] = [
-            .path(.filePath, path, encoding: stringEncoding),
-            .string(.fileName, name, encoding: stringEncoding),
-            .uint32(.transferSize, size),
-            .uint16(.folderItemCount, itemCount)
-        ]
-        if resume {
-            fields.append(.uint16(.folderResumeFlag, 1))
-        }
+        let largeFile = largeFilesEnabled && size > 0xFFFF_FFFF
+        let fields = Self.folderUploadRequestFields(
+            path: path,
+            name: name,
+            size: size,
+            itemCount: itemCount,
+            resume: resume,
+            largeFile: largeFile,
+            encoding: stringEncoding
+        )
         let reply = try await sendExpectingReply(transactionID: 213, fields: fields)
         guard let transferID = reply.uint32(.transferID) else {
             throw HotlineError.malformedReply(reason: "missing transferID")
@@ -273,11 +309,11 @@ extension HotlineNetworkClient {
 
         let actor = try await openFolderSideChannel(
             transferID: transferID,
-            totalSize: UInt64(size),
+            totalSize: size,
             isDownload: false
         )
         activeTransfers[transferID] = actor
-        return TransferHandle(transferID: transferID, totalSize: UInt64(size))
+        return TransferHandle(transferID: transferID, totalSize: size)
     }
 
     /// Drive the per-item handshake for a folder upload started with
@@ -401,15 +437,16 @@ extension HotlineNetworkClient {
 
         let total = UploadFraming.totalSize(
             nameLength: nameBytes.count,
-            dataLength: UInt32(dataPayload.count),
-            resourceLength: UInt32(item.resourceFork.count)
+            dataLength: UInt64(dataPayload.count),
+            resourceLength: UInt64(item.resourceFork.count)
         )
 
-        // The server expects the per-item total size as a UInt32 before
-        // the FILP block (HETransferThread.m line 904).
-        var sizeBytes = Data()
-        sizeBytes.appendBigEndian(total)
-        try await actor.sendBytes(sizeBytes)
+        // The server expects the per-item total size before the FILP
+        // block (HETransferThread.m line 904). Legacy = UInt32; large-file
+        // sessions widen it to UInt64 so a >4 GiB item is representable.
+        try await actor.sendBytes(
+            FolderUploadFraming.encodeItemSizePrefix(total, largeFile: largeFilesEnabled)
+        )
 
         let framed = UploadFraming.encode(
             fileName: fileName,
@@ -573,9 +610,11 @@ extension HotlineNetworkClient {
                     return
                 }
                 let encoding = self.stringEncoding
+                let largeFile = await self.largeFilesEnabled
                 await FolderDownloadDecoder.drive(
                     actor: actor,
                     encoding: encoding,
+                    largeFile: largeFile,
                     resumeProvider: resumeProvider,
                     progress: progress,
                     continuation: continuation
