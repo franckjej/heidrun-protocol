@@ -278,12 +278,17 @@ public actor HotlineNetworkClient: HotlineClient {
         name: String, password: String, nickname: String,
         icon: UInt16, emoji: String? = nil
     ) async throws {
-        // Nickname is NOT in the login packet. It's sent post-login via
-        // TX 304 (gtkhx-style) so it ships in the negotiated encoding. Login
-        // request + reply stay legacy (macOS Roman) on both sides.
+        // Option 2: the nickname rides IN the login packet. It's encoded
+        // UTF-8 when we advertise CAPABILITY_TEXT_ENCODING (we always do,
+        // since `.supported` includes it), else macOS Roman. The server
+        // decodes the login nick as UTF-8 when the login caps include the
+        // textEncoding bit. Login name/password stay obfuscated credentials.
+        let loginNickEncoding: String.Encoding =
+            CapabilityFlags.supported.contains(.textEncoding) ? .utf8 : stringEncoding
         var fields: [PacketField] = [
             .obfuscatedString(.login, name, encoding: stringEncoding),
             .obfuscatedString(.password, password, encoding: stringEncoding),
+            .string(.nickname, nickname, encoding: loginNickEncoding),
             .uint16(.icon, icon == 0 ? 1 : icon),
             .uint16(.clientVersion, UInt16(clientVersion)),
             .uint8(.resourceForkSupport, 1),
@@ -306,19 +311,13 @@ public actor HotlineNetworkClient: HotlineClient {
         self.serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
         self.largeFilesEnabled = CapabilityFlags.negotiatedLargeFiles(echoed: reply.uint16(.capabilities))
         // Text-encoding negotiation (fogWraith CAPABILITY_TEXT_ENCODING):
-        // flip outbound to UTF-8 BEFORE sending the post-login nickname so
-        // the nick goes out in the negotiated encoding. The engine flips its
-        // own inbound decode independently on the same reply.
+        // flip subsequent outbound traffic to UTF-8 when the server echoes
+        // the bit. The login nickname was already sent UTF-8 in the login
+        // packet above; the engine flips its own inbound decode independently
+        // on the same reply.
         if CapabilityFlags.negotiatedTextEncoding(echoed: reply.uint16(.capabilities)) {
             self.stringEncoding = .utf8
         }
-        // Send the nickname now (TX 304) — same field set as changeNickname.
-        // Encoded with the now-possibly-flipped stringEncoding.
-        try await sendNoReply(transactionID: 304, fields: [
-            .string(.nickname, nickname, encoding: stringEncoding),
-            .uint16(.icon, icon == 0 ? 1 : icon),
-            .string(.userEmoji, emoji ?? "", encoding: .utf8)
-        ])
         // Start the heartbeat now that the server has authenticated us.
         // Pre-login pings would either be ignored or treated as a
         // protocol violation depending on the server.
