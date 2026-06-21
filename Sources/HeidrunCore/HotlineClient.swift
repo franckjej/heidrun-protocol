@@ -384,11 +384,12 @@ public protocol HotlineClient: Sendable {
     /// `nil` when the server hasn't configured one.
     func downloadBanner() async throws -> ServerBanner?
 
-    /// Begin uploading a file.
+    /// Begin uploading a file. `size` is 64-bit so files over 4 GiB can be
+    /// announced when the session negotiated `.largeFiles`.
     func startUpload(
         at path: RemotePath,
         name: String,
-        size: UInt32,
+        size: UInt64,
         resume: Bool
     ) async throws -> TransferHandle
 

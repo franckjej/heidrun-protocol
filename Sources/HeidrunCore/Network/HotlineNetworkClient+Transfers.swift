@@ -99,26 +99,58 @@ extension HotlineNetworkClient {
         return TransferHandle(transferID: transferID, totalSize: UInt64(totalSize))
     }
 
-    public func startUpload(at path: RemotePath, name: String, size: UInt32, resume: Bool) async throws -> TransferHandle {
-        // Control channel: transID 203 — uploadFile.
-        // Fields per HEClient.m line 1771+:
-        //   filePath(202), transferSize(108)=size, fileName(201), [optional resume flag]
+    /// Assemble the TX 203 (uploadFile) request fields. Pure so the
+    /// large-file dialect can be unit-tested without a side channel.
+    /// `largeFile` true ⇒ a `.uint64(.xferSize64, size)` field is appended
+    /// after the clamped legacy `transferSize`; false ⇒ byte-identical to
+    /// the pre-large-files request.
+    static func uploadRequestFields(
+        path: RemotePath,
+        name: String,
+        size: UInt64,
+        resume: Bool,
+        largeFile: Bool,
+        encoding: String.Encoding
+    ) -> [PacketField] {
         var fields: [PacketField] = [
-            .path(.filePath, path, encoding: stringEncoding),
-            .uint32(.transferSize, size),
-            .string(.fileName, name, encoding: stringEncoding)
+            .path(.filePath, path, encoding: encoding),
+            .uint32(.transferSize, UInt32(clamping: size)),
+            .string(.fileName, name, encoding: encoding)
         ]
+        if largeFile {
+            fields.append(.uint64(.xferSize64, size))
+        }
         if resume {
             fields.append(.uint16(.parameter, 1))
         }
+        return fields
+    }
+
+    public func startUpload(at path: RemotePath, name: String, size: UInt64, resume: Bool) async throws -> TransferHandle {
+        // Control channel: transID 203 — uploadFile.
+        // Fields per HEClient.m line 1771+:
+        //   filePath(202), transferSize(108)=size, fileName(201), [optional resume flag]
+        let largeFile = largeFilesEnabled && size > 0xFFFF_FFFF
+        let fields = Self.uploadRequestFields(
+            path: path,
+            name: name,
+            size: size,
+            resume: resume,
+            largeFile: largeFile,
+            encoding: stringEncoding
+        )
         let reply = try await sendExpectingReply(transactionID: 203, fields: fields)
         guard let transferID = reply.uint32(.transferID) else {
             throw HotlineError.malformedReply(reason: "missing transferID")
         }
 
-        let actor = try await openSideChannel(transferID: transferID, totalSize: UInt64(size))
+        let actor = try await openSideChannel(
+            transferID: transferID,
+            totalSize: size,
+            isLargeFile: largeFile
+        )
         activeTransfers[transferID] = actor
-        return TransferHandle(transferID: transferID, totalSize: UInt64(size))
+        return TransferHandle(transferID: transferID, totalSize: size)
     }
 
     public func sendUpload(
@@ -134,6 +166,18 @@ extension HotlineNetworkClient {
     ) async throws {
         guard let actor = activeTransfers[handle.transferID] else {
             throw HotlineError.notConnected
+        }
+
+        let isLargeFile = actor.isLargeFile
+
+        // Large-file mode: skip the FILP/INFO/DATA/MACR envelope entirely
+        // and ship the data fork as raw bytes behind the 24-byte handshake
+        // (already sent by openSideChannel). Resource forks aren't carried
+        // on this path — large files are data-fork-only.
+        if isLargeFile {
+            try await sendLargeUpload(content, on: actor, progress: progress)
+            activeTransfers.removeValue(forKey: handle.transferID)
+            return
         }
 
         let nameBytes = fileName.data(using: stringEncoding, allowLossyConversion: true) ?? Data()
@@ -179,6 +223,27 @@ extension HotlineNetworkClient {
         // the kernel drains everything before the connection tears down.
         try await actor.finishUpload(UploadFraming.encodeSuffix(resourceFork: resourceFork))
         activeTransfers.removeValue(forKey: handle.transferID)
+    }
+
+    /// Stream a large file's data fork as raw bytes. The 24-byte
+    /// large-file HTXF handshake is sent by `openSideChannel`; this just
+    /// pushes the body in progress-friendly chunks and closes with a FIN.
+    private func sendLargeUpload(
+        _ content: Data,
+        on actor: FileTransferActor,
+        progress: (@Sendable (UInt64) async -> Void)?
+    ) async throws {
+        let chunkSize = 64 * 1024
+        var offset = content.startIndex
+        var sent: UInt64 = 0
+        while offset < content.endIndex {
+            let end = content.index(offset, offsetBy: chunkSize, limitedBy: content.endIndex) ?? content.endIndex
+            try await actor.sendBytes(content[offset..<end])
+            sent &+= UInt64(content.distance(from: offset, to: end))
+            offset = end
+            if let progress { await progress(sent) }
+        }
+        try await actor.finishUpload()
     }
 
     public func startFolderUpload(
