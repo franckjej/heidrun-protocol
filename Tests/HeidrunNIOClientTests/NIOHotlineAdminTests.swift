@@ -14,6 +14,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let kick = try await conn.readPacket()
             #expect(kick.header.transactionID == 110)
             #expect(kick.fields.uint16(.socket) == 42)
@@ -36,6 +37,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let kick = try await conn.readPacket()
             #expect(kick.fields.uint16(.socket) == 7)
             #expect(kick.fields.uint16(.banFlag) == nil)
@@ -57,6 +59,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let bc = try await conn.readPacket()
             #expect(bc.header.transactionID == 355)
             #expect(bc.fields.string(.message, encoding: .macOSRoman) == "server going down")
@@ -78,6 +81,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let create = try await conn.readPacket()
             #expect(create.header.transactionID == 350)
             #expect(create.fields.obfuscatedString(.login, encoding: .macOSRoman) == "bob")
@@ -104,6 +108,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let del = try await conn.readPacket()
             #expect(del.header.transactionID == 351)
             #expect(del.fields.obfuscatedString(.login, encoding: .macOSRoman) == "bob")
@@ -125,6 +130,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let open = try await conn.readPacket()
             #expect(open.header.transactionID == 352)
             // login is sent PLAIN (not obfuscated) for 352:
@@ -154,6 +160,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
 
             // 1) nil password → no .password field
             let a = try await conn.readPacket()
@@ -192,6 +199,7 @@ struct NIOHotlineAdminTests {
             let conn = try await server.acceptHandshake()
             let loginPacket = try await conn.readPacket()
             try await conn.sendReply(transactionID: 107, taskNumber: loginPacket.header.taskNumber)
+            try await conn.drainPostLoginNick()
             let create = try await conn.readPacket()
             try await conn.sendReply(
                 transactionID: 350, taskNumber: create.header.taskNumber,
