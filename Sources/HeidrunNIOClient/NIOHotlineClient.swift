@@ -225,7 +225,7 @@ public actor NIOHotlineClient {
                 name: reply.string(.fileName, encoding: stringEncoding) ?? name,
                 type: typeFCC,
                 creator: creatorFCC,
-                size: size,
+                size: UInt64(size),
                 itemCount: 0
             ),
             creationDate: reply.date(.fileCreationDate),

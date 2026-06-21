@@ -21,7 +21,8 @@ public enum FileListEntryCodec {
         var cursor = ByteCursor(data: data)
         let typeBytes    = cursor.readData(count: 4)
         let creatorBytes = cursor.readData(count: 4)
-        var size: UInt32 = cursor.readBigEndian()
+        let size32: UInt32 = cursor.readBigEndian()
+        var size: UInt64 = UInt64(size32)
         var itemCount: UInt32 = cursor.readBigEndian()
         let nameLength: UInt32 = cursor.readBigEndian()
         guard cursor.remaining >= Int(nameLength) else { return nil }
@@ -37,7 +38,7 @@ public enum FileListEntryCodec {
         // invariant — for folders, `itemCount` always carries the
         // count, regardless of which slot the server used.
         if type == .folder && itemCount == 0 && size > 0 {
-            itemCount = size
+            itemCount = size32
             size = 0
         }
 
@@ -58,12 +59,54 @@ public enum FileListEntryCodec {
         var data = Data(capacity: 20 + file.name.count)
         data.appendBigEndian(file.type.rawValue)
         data.appendBigEndian(file.creator.rawValue)
-        data.appendBigEndian(file.size)
+        data.appendBigEndian(UInt32(clamping: file.size))
         data.appendBigEndian(file.itemCount)
         let nameBytes = file.name.data(using: encoding, allowLossyConversion: true) ?? Data()
         data.appendBigEndian(UInt32(clamping: nameBytes.count))
         data.append(nameBytes)
         return PacketField(key: HotlineObjectKey.fileListEntry, data: data)
+    }
+
+    /// Encode a `RemoteFile` for the large-file dialect: the legacy entry
+    /// (size clamped to 32 bits) plus a companion `fileSize64` field
+    /// carrying the true 64-bit size.
+    public static func encodeLargeFile(
+        _ file: RemoteFile,
+        encoding: String.Encoding = .macOSRoman
+    ) -> (entry: PacketField, size64: PacketField) {
+        let entry = encode(file, encoding: encoding)
+        let size64 = PacketField.uint64(.fileSize64, file.size)
+        return (entry, size64)
+    }
+
+    /// Decode an ordered list of fields into `RemoteFile`s. When a
+    /// `fileListEntry` is immediately followed by a `fileSize64` field,
+    /// the decoded file's `size` is overwritten with the 64-bit value.
+    public static func decodeList(
+        fields: [PacketField],
+        encoding: String.Encoding = .macOSRoman
+    ) -> [RemoteFile] {
+        var result: [RemoteFile] = []
+        var index = fields.startIndex
+        while index < fields.endIndex {
+            let field = fields[index]
+            guard field.key == HotlineObjectKey.fileListEntry.rawValue,
+                  var file = decode(field.data, encoding: encoding) else {
+                index = fields.index(after: index)
+                continue
+            }
+            let nextIndex = fields.index(after: index)
+            if nextIndex < fields.endIndex,
+               fields[nextIndex].key == HotlineObjectKey.fileSize64.rawValue,
+               let size64 = [fields[nextIndex]].uint64(.fileSize64) {
+                file.size = size64
+                index = fields.index(after: nextIndex)
+            } else {
+                index = nextIndex
+            }
+            result.append(file)
+        }
+        return result
     }
 
     private static func fourCharCode(from data: Data) -> FourCharCode {

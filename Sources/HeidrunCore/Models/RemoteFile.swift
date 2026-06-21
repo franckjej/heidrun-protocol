@@ -19,8 +19,9 @@ public struct RemoteFile: Sendable, Hashable, Identifiable {
     public var type: FourCharCode
 
     /// Size in bytes. For folders this is typically `0` and `itemCount`
-    /// carries the entry count instead.
-    public var size: UInt32
+    /// carries the entry count instead. 64-bit to support large files
+    /// (> 4 GiB) when the `largeFiles` capability is negotiated.
+    public var size: UInt64
 
     /// Number of items inside this folder. Zero for regular files.
     public var itemCount: UInt32
@@ -32,7 +33,7 @@ public struct RemoteFile: Sendable, Hashable, Identifiable {
         name: String,
         type: FourCharCode = .file,
         creator: FourCharCode = .unknown,
-        size: UInt32 = 0,
+        size: UInt64 = 0,
         itemCount: UInt32 = 0
     ) {
         self.name = name
