@@ -325,8 +325,11 @@ download of a > 4 GiB file round-trips.
 | Get File Info | 206 | append `fileSize64` |
 
 Resume offsets > 4 GiB ride `offset64` (`0x01F2`); the legacy `fileResumeInfo`
-structure stays 32-bit. **Folder** transfers (210 / 213) are **not** 64-bit yet —
-`folderItemCount64` is reserved for that future work.
+structure stays 32-bit. **Folder** transfers (210 / 213) are 64-bit as of rc30:
+the folder stream's per-item size prefix widens to 8 bytes (UInt64) when the
+session negotiated large files (4 bytes otherwise), and the reply/request carry
+`xferSize64`. The per-folder **item count** stays `UInt16` (max 65,535 items);
+`folderItemCount64` (`0x01F4`) is reserved for lifting that later.
 
 ### Compatibility matrix
 
@@ -339,6 +342,63 @@ structure stays 32-bit. **Folder** transfers (210 / 213) are **not** 64-bit yet 
 
 ---
 
+## `textEncoding` — UTF-8 strings
+
+Negotiates **UTF-8** for all human-readable strings (chat, nicknames, file/folder
+names, comments, news, errors, chat topic) in place of macOS Roman. Like
+`largeFiles`, it rides the fogWraith `0x01F0` capability bitmask (so it
+interoperates with the modern ecosystem, e.g. gtkhx), and degrades to macOS Roman
+with any peer that doesn't echo it.
+
+### Negotiation
+
+```
+key:   0x01F0  (capabilities)
+value: UInt16 bitmask, bit 1 = CAPABILITY_TEXT_ENCODING (0x0002)
+```
+
+Advertised in `login` (107), echoed by the server in the reply when enabled.
+
+### When the flip takes effect
+
+The encoding flips to UTF-8 for **all traffic after the login reply**. The login
+request *and the login reply itself* stay macOS Roman on both sides (so they're
+consistent and ASCII-safe). The flip is applied at three actor-isolated points:
+the engine's inbound decode flips when it processes a reply carrying the bit
+(serial dispatch → no race); each client's outbound encoding flips after reading
+the reply; the server flips after sending the reply.
+
+### The login nickname (the one special case)
+
+The capability is negotiated *in* the login packet, so the login's own display
+string — the **nickname** — is special-cased: it is encoded **UTF-8 when the
+client advertises `textEncoding` in that same login packet**, and the server
+decodes it as UTF-8 when the login packet's caps include the bit. (This keeps the
+nick in login — the server's audit log, roster, and `userChanged` broadcast all
+see the real nick immediately — rather than deferring it to a post-login TX 304.)
+`login`/`password` remain XOR-0xFF credential bytes (encoding-agnostic); `emoji`
+is always UTF-8 regardless.
+
+### Broadcasts (current limitation)
+
+Broadcasts (chat, `userChanged`, news, topic) are encoded once with the
+broadcasting session's encoding and delivered to all recipients. This is fully
+correct when every connected client negotiated UTF-8 (the all-Heidrun case). In a
+**mixed** population — a legacy macOS-Roman client present alongside UTF-8 clients
+— non-ASCII broadcast content can mis-render for the peer whose encoding differs
+from the broadcaster's (graceful mojibake, never a crash). Per-recipient broadcast
+encoding is a future refinement.
+
+### Compatibility matrix
+
+| Client | Server | Result |
+|--------|--------|--------|
+| sends `0x01F0` bit 1 | echoes bit 1 | ✅ UTF-8 for all strings post-login; login nick UTF-8 |
+| sends bit 1 | no echo | session stays macOS Roman; client's login nick was UTF-8 but a non-cap server may mojibake a non-ASCII login nick (ASCII fine) |
+| no `0x01F0` | — | macOS Roman everywhere, byte-identical to legacy |
+
+---
+
 ## Versioning
 
 | Extension   | Introduced |
@@ -346,6 +406,8 @@ structure stays 32-bit. **Folder** transfers (210 / 213) are **not** 64-bit yet 
 | `0xE000` field band, `userEmoji` | `heidrun-protocol` **v1.0.0-rc7**, `heidrun-server` **v1.0.0-rc5** (2026-05) |
 | `0xE002` `resourceForkSupport`   | `heidrun-protocol` **v1.0.0-rc14** (2026-06), `heidrun-server` next rc |
 | `largeFiles` (`0x01F0`–`0x01F4`, 24-byte HTXF, 64-bit fork headers) | `heidrun-protocol` **v1.0.0-rc27**, `heidrun-server` **v1.0.0** (server build pinned rc28), client pinned rc29 (2026-06). rc28 = > 4 GiB framed-download fix; rc29 = `largeFilesEnabled` on the client protocol surface |
+| `largeFiles` — folder transfers (210 / 213, gated 8-byte item prefix, `xferSize64`) | `heidrun-protocol` **v1.0.0-rc30** (2026-06); server + client pinned rc30 |
+| `textEncoding` (`0x01F0` bit 1, UTF-8, login-nick special case, 3-actor flip) | `heidrun-protocol` **v1.0.0-rc32**, server + client pinned rc32 (2026-06). (rc31 was a superseded variant that moved the nick to a post-login TX 304.) |
 
 When adding a new **Heidrun** extension: append a field key in the `0xE000` band,
 document it here with its wire layout, keep it additive (omittable / trailing),
