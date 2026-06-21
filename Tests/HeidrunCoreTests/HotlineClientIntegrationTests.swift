@@ -173,6 +173,52 @@ struct HotlineClientIntegrationTests {
         sc.close()
     }
 
+    @Test("listFiles decodes legacy + large-file entries in order")
+    func listFilesDecodesLargeEntries() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let serverConnTask = server.acceptHandshake()
+        let client = try await HotlineNetworkClient.connect(
+            settings: ConnectionSettings(
+                name: "test",
+                address: "127.0.0.1",
+                port: server.port
+            )
+        )
+        let serverConn = try await serverConnTask
+
+        let small = RemoteFile(name: "small.txt", size: 1234)
+        let huge = RemoteFile(name: "huge.bin", size: 0x2_0000_0000)
+        let (hugeEntry, hugeSize64) = FileListEntryCodec.encodeLargeFile(huge)
+
+        async let serverWork: Void = {
+            let packet = try await serverConn.readPacket()
+            #expect(packet.header.transactionID == 200)
+            try await serverConn.sendReply(
+                transactionID: packet.header.transactionID,
+                taskNumber: packet.header.taskNumber,
+                fields: [
+                    FileListEntryCodec.encode(small),
+                    hugeEntry,
+                    hugeSize64
+                ]
+            )
+        }()
+
+        let files = try await client.listFiles(at: RemotePath())
+        try await serverWork
+
+        #expect(files.count == 2)
+        #expect(files[0].name == "small.txt")
+        #expect(files[0].size == 1234)
+        #expect(files[1].name == "huge.bin")
+        #expect(files[1].size == 0x2_0000_0000)
+
+        await client.disconnect()
+        serverConn.close()
+    }
+
     /// `fetchUserInfo` (303) parses the server's reply into a
     /// `UserInfo` value carrying the nickname, status flags, account
     /// login (field 105, XOR-obfuscated on the wire), and the

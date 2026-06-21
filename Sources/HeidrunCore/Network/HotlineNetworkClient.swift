@@ -536,9 +536,7 @@ public actor HotlineNetworkClient: HotlineClient {
             transactionID: 200,
             fields: [.path(.filePath, path, encoding: stringEncoding)]
         )
-        return reply
-            .filter { $0.key == HotlineObjectKey.fileListEntry.rawValue }
-            .compactMap { FileListEntryCodec.decode($0.data, encoding: stringEncoding) }
+        return FileListEntryCodec.decodeList(fields: Array(reply), encoding: stringEncoding)
     }
 
     public func deleteEntry(at path: RemotePath, name: String) async throws {
