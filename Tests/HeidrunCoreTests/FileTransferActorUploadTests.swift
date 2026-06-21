@@ -76,6 +76,79 @@ struct FileTransferActorUploadTests {
         serverConn.cancel()
     }
 
+    @Test("large-file download sends the 24-byte handshake parsing as isLargeFile")
+    func largeFileDownloadHandshake() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let acceptedConnection = server.acceptNextConnection()
+
+        let clientQueue = DispatchQueue(label: "test.largeFile.download")
+        let clientConnection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: NWEndpoint.Port(rawValue: server.port)!,
+            using: .tcp
+        )
+        try await clientConnection.startAndWaitForReady(on: clientQueue)
+        let serverConn = try await acceptedConnection
+
+        let bigSize: UInt64 = 0x1_2345_6789 // ~4.9 GiB
+        let actor = FileTransferActor(
+            connection: clientConnection,
+            queue: clientQueue,
+            transferID: 0x0A0B0C0D,
+            totalSize: bigSize,
+            isLargeFile: true
+        )
+
+        async let preamble: Data = serverConn.receiveExactly(TransferHandshake.largeFileByteCount)
+        try await actor.sendHandshake()
+
+        let bytes = try await preamble
+        #expect(bytes.count == TransferHandshake.largeFileByteCount)
+        let parsed = TransferHandshake.parse(bytes)
+        #expect(parsed?.isLargeFile == true)
+        #expect(parsed?.transferID == 0x0A0B0C0D)
+        #expect(parsed?.size == bigSize)
+
+        serverConn.cancel()
+    }
+
+    @Test("normal download still sends a 16-byte handshake")
+    func normalDownloadHandshake() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let acceptedConnection = server.acceptNextConnection()
+
+        let clientQueue = DispatchQueue(label: "test.normal.download")
+        let clientConnection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: NWEndpoint.Port(rawValue: server.port)!,
+            using: .tcp
+        )
+        try await clientConnection.startAndWaitForReady(on: clientQueue)
+        let serverConn = try await acceptedConnection
+
+        let actor = FileTransferActor(
+            connection: clientConnection,
+            queue: clientQueue,
+            transferID: 42,
+            totalSize: 1000
+        )
+
+        async let preamble: Data = serverConn.receiveExactly(TransferHandshake.byteCount)
+        try await actor.sendHandshake()
+
+        let bytes = try await preamble
+        #expect(bytes.count == TransferHandshake.byteCount)
+        let parsed = TransferHandshake.parse(bytes)
+        #expect(parsed?.isLargeFile == false)
+        #expect(parsed?.transferID == 42)
+
+        serverConn.cancel()
+    }
+
     @Test("finishUpload with empty trailer completes without throwing")
     func finishUploadEmptyTrailerCompletes() async throws {
         let server = try await MiniHotlineServer.start()

@@ -21,6 +21,11 @@ public actor FileTransferActor {
     public let transferID: UInt32
     public let totalSize: UInt64
 
+    /// `true` when the session negotiated `.largeFiles` AND this transfer's
+    /// size exceeds the 32-bit cap, so the side channel uses the 24-byte
+    /// HTXF handshake + 64-bit size. Set by the caller at construction.
+    public let isLargeFile: Bool
+
     private let connection: NWConnection
     private let queue: DispatchQueue
     private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
@@ -32,18 +37,27 @@ public actor FileTransferActor {
         connection: NWConnection,
         queue: DispatchQueue,
         transferID: UInt32,
-        totalSize: UInt64
+        totalSize: UInt64,
+        isLargeFile: Bool = false
     ) {
         self.connection = connection
         self.queue = queue
         self.transferID = transferID
         self.totalSize = totalSize
+        self.isLargeFile = isLargeFile
     }
 
-    /// Send the 16-byte HTXF handshake. Run once after the connection has
-    /// reached `.ready` and before the caller iterates `bytes()`.
+    /// Send the HTXF handshake. Run once after the connection has reached
+    /// `.ready` and before the caller iterates `bytes()`. Sends the 24-byte
+    /// large-file variant carrying `totalSize` when `isLargeFile` is set,
+    /// otherwise the legacy 16-byte form with `transferSize`.
     public func sendHandshake(transferSize: UInt32 = 0) async throws {
-        let bytes = TransferHandshake.encode(transferID: transferID, transferSize: transferSize)
+        let bytes: Data
+        if isLargeFile {
+            bytes = TransferHandshake.encodeLargeFile(transferID: transferID, size: totalSize)
+        } else {
+            bytes = TransferHandshake.encode(transferID: transferID, transferSize: transferSize)
+        }
         try await connection.sendAsync(bytes)
     }
 

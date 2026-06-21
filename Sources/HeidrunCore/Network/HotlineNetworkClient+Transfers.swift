@@ -37,6 +37,13 @@ extension HotlineNetworkClient {
                 key: .fileResumeInfo,
                 data: ResumeInfoCodec.encode(resume)
             ))
+            // Large-file extension: carry a 64-bit resume offset alongside
+            // the legacy 74-byte blob when it exceeds the 32-bit cap. The
+            // ≤4 GiB path is byte-identical (the field is omitted).
+            let offset64 = UInt64(dataForkOffset)
+            if largeFilesEnabled && offset64 > 0xFFFF_FFFF {
+                fields.append(.uint64(.offset64, offset64))
+            }
         }
         let reply = try await sendExpectingReply(
             transactionID: 202,
@@ -45,16 +52,24 @@ extension HotlineNetworkClient {
         guard let transferID = reply.uint32(.transferID) else {
             throw HotlineError.malformedReply(reason: "missing transferID")
         }
-        let totalSize = reply.uint32(.transferSize) ?? 0
+        // Prefer the 64-bit size when the server sends it; fall back to the
+        // legacy 32-bit field otherwise.
+        let totalSize = reply.uint64(.xferSize64)
+            ?? UInt64(reply.uint32(.transferSize) ?? 0)
 
         // The session is framed iff the server echoed
         // `resourceForkSupport` on login AND we requested a fresh
         // download (resume + framed isn't a supported combo on the
         // server side, so we match that).
         let framed = serverSupportsResourceForks && resume.isFresh
-        let actor = try await openSideChannel(transferID: transferID, totalSize: UInt64(totalSize))
+        let largeFile = largeFilesEnabled && totalSize > 0xFFFF_FFFF
+        let actor = try await openSideChannel(
+            transferID: transferID,
+            totalSize: totalSize,
+            isLargeFile: largeFile
+        )
         activeTransfers[transferID] = actor
-        return TransferHandle(transferID: transferID, totalSize: UInt64(totalSize), framed: framed)
+        return TransferHandle(transferID: transferID, totalSize: totalSize, framed: framed)
     }
 
     public func startFolderDownload(at path: RemotePath, name: String) async throws -> TransferHandle {
@@ -521,8 +536,16 @@ extension HotlineNetworkClient {
     /// Open a fresh TCP connection to the server's transfer port (control
     /// port + 1), perform the HTXF handshake, and hand back the actor
     /// that wraps the connection.
-    private func openSideChannel(transferID: UInt32, totalSize: UInt64) async throws -> FileTransferActor {
-        let actor = try await openRawSideChannel(transferID: transferID, totalSize: totalSize)
+    private func openSideChannel(
+        transferID: UInt32,
+        totalSize: UInt64,
+        isLargeFile: Bool = false
+    ) async throws -> FileTransferActor {
+        let actor = try await openRawSideChannel(
+            transferID: transferID,
+            totalSize: totalSize,
+            isLargeFile: isLargeFile
+        )
         try await actor.sendHandshake(transferSize: 0)
         return actor
     }
@@ -605,7 +628,8 @@ extension HotlineNetworkClient {
     /// before they hit the HTXF preamble reader).
     private func openRawSideChannel(
         transferID: UInt32,
-        totalSize: UInt64
+        totalSize: UInt64,
+        isLargeFile: Bool = false
     ) async throws -> FileTransferActor {
         let host = NWEndpoint.Host(connectionSettings.address)
         guard let port = NWEndpoint.Port(rawValue: connectionSettings.port &+ 1) else {
@@ -639,7 +663,8 @@ extension HotlineNetworkClient {
             connection: sideConnection,
             queue: sideQueue,
             transferID: transferID,
-            totalSize: totalSize
+            totalSize: totalSize,
+            isLargeFile: isLargeFile
         )
     }
 }
