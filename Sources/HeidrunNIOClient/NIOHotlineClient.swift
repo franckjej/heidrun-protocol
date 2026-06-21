@@ -204,9 +204,7 @@ public actor NIOHotlineClient {
             fields: [.path(.filePath, path, encoding: stringEncoding)],
             expectsReply: true
         )
-        return reply
-            .filter { $0.key == HotlineObjectKey.fileListEntry.rawValue }
-            .compactMap { FileListEntryCodec.decode($0.data, encoding: stringEncoding) }
+        return FileListEntryCodec.decodeList(fields: Array(reply), encoding: stringEncoding)
     }
 
     /// Fetch metadata for one file at `(path, name)`. TX 206 reply
