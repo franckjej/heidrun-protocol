@@ -458,6 +458,14 @@ public protocol HotlineClient: Sendable {
     /// raw data-fork bytes and only `downloadStream(for:)` works.
     var serverSupportsResourceForks: Bool { get async }
 
+    /// `true` after a `login(...)` against a server that echoed the
+    /// `CAPABILITY_LARGE_FILES` bit (fogWraith `DATA_CAPABILITIES` 0x01F0).
+    /// When set, transfers larger than 4 GiB use the 64-bit handshake +
+    /// size fields; otherwise they must be refused (the legacy 32-bit
+    /// fields cannot represent them). Defaults to `false` for conformers
+    /// that don't negotiate it.
+    var largeFilesEnabled: Bool { get async }
+
     /// Send the bytes for an upload started with `startUpload(...)`.
     ///
     /// `content` is the data fork. `resourceFork` rides the MACR trailer
@@ -499,6 +507,11 @@ public protocol HotlineClient: Sendable {
 }
 
 extension HotlineClient {
+    /// Default for conformers (test doubles) that don't negotiate the
+    /// large-file capability. The production clients store the negotiated
+    /// value and override this.
+    public var largeFilesEnabled: Bool { get async { false } }
+
     #if canImport(Network)
     /// Default no-op for clients that don't drive transfers (test
     /// doubles). The production `HotlineNetworkClient` overrides this
