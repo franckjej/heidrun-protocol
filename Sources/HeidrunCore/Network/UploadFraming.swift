@@ -48,6 +48,36 @@ import Foundation
 /// ```
 public enum UploadFraming {
 
+    /// Build a 16-byte FFO fork header carrying a length up to 64 bits.
+    /// The high 32 bits live at offset 4-7 (the first reserved word) and
+    /// the low 32 bits at offset 12-15. For legacy small files the high
+    /// word is zero, so the bytes are identical to the historical
+    /// 32-bit-only header.
+    /// ```
+    /// [0..3]   magic
+    /// [4..7]   UInt32 high32(length)
+    /// [8..11]  4 zero/reserved bytes
+    /// [12..15] UInt32 low32(length)
+    /// ```
+    static func forkHeader(magic: String, length: UInt64) -> Data {
+        var out = Data(capacity: 16)
+        out.append(magic.data(using: .ascii) ?? Data(repeating: 0, count: 4))
+        out.appendBigEndian(UInt32(truncatingIfNeeded: length >> 32))
+        out.append(Data(repeating: 0, count: 4))
+        out.appendBigEndian(UInt32(truncatingIfNeeded: length))
+        return out
+    }
+
+    /// Recover the 64-bit fork length from a 16-byte FFO fork header.
+    static func forkLength(from header: Data) -> UInt64 {
+        var cursor = ByteCursor(data: header)
+        _ = cursor.readData(count: 4)              // magic
+        let high: UInt32 = cursor.readBigEndian()  // offset 4-7
+        _ = cursor.readData(count: 4)              // reserved 8-11
+        let low: UInt32 = cursor.readBigEndian()   // offset 12-15
+        return (UInt64(high) << 32) | UInt64(low)
+    }
+
     /// Total bytes the side channel will carry after the 16-byte HTXF
     /// handshake (which is sent separately).
     public static func totalSize(
@@ -134,9 +164,7 @@ public enum UploadFraming {
         out.append(Data(repeating: 0, count: 2))              // trailing pad
 
         // DATA fork header (16 bytes).
-        out.append(contentsOf: [0x44, 0x41, 0x54, 0x41])      // "DATA"
-        out.append(Data(repeating: 0, count: 8))              // reserved
-        out.appendBigEndian(dataLength)
+        out.append(forkHeader(magic: "DATA", length: UInt64(dataLength)))
 
         return out
     }
@@ -149,9 +177,7 @@ public enum UploadFraming {
     /// behaviour.
     public static func encodeSuffix(resourceFork: Data = Data()) -> Data {
         var out = Data()
-        out.append(contentsOf: [0x4D, 0x41, 0x43, 0x52])      // "MACR"
-        out.append(Data(repeating: 0, count: 8))              // reserved
-        out.appendBigEndian(UInt32(resourceFork.count))       // resource length
+        out.append(forkHeader(magic: "MACR", length: UInt64(resourceFork.count)))
         out.append(resourceFork)
         return out
     }
@@ -240,14 +266,20 @@ public enum UploadFraming {
             try skip(Int(infoLength) - infoConsumed)
         }
 
-        try readMagic("DATA")
-        try skip(8)                                   // reserved
-        let dataLength = try readBEUInt32()
+        try need(16)
+        let dataHeader = try readBytes(16)
+        guard String(data: dataHeader.prefix(4), encoding: .ascii) == "DATA" else {
+            throw DecodeError.missingMagic("DATA")
+        }
+        let dataLength = UploadFraming.forkLength(from: dataHeader)
         let fork = try readBytes(Int(dataLength))
 
-        try readMagic("MACR")
-        try skip(8)                                   // reserved
-        let resourceLength = try readBEUInt32()
+        try need(16)
+        let resourceHeader = try readBytes(16)
+        guard String(data: resourceHeader.prefix(4), encoding: .ascii) == "MACR" else {
+            throw DecodeError.missingMagic("MACR")
+        }
+        let resourceLength = UploadFraming.forkLength(from: resourceHeader)
         let resourceFork = resourceLength > 0 ? try readBytes(Int(resourceLength)) : Data()
 
         return UploadEnvelope(
