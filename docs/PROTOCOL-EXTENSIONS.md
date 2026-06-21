@@ -236,13 +236,119 @@ gated on the negotiation.
 
 ---
 
+## `largeFiles` — 64-bit transfers (> 4 GiB)
+
+Base Hotline caps every file size, transfer length, and offset at a 32-bit
+field — a hard **4 GiB ceiling**. This extension lifts it. Unlike the other
+entries here it is **not** a Heidrun (`0xE000`-band) invention: it adopts the
+**fogWraith capability scheme** (`github.com/fogWraith/Hotline`, `DATA_CAPABILITIES`
+bit 0), so a Heidrun client interoperates with other modern implementations
+(e.g. gtkhx) that speak the same dialect. It is purely additive: both the legacy
+32-bit and the new 64-bit fields travel together, so any peer that ignores the
+64-bit fields still sees a (clamped) 32-bit value.
+
+### Capability negotiation — `DATA_CAPABILITIES` (`0x01F0`)
+
+A big-endian `UInt16` **bitmask** carried in `login` (107). The client advertises
+the bits it supports; the server echoes back **only** the bits it enables for the
+session (the intersection). Large files are on for the session iff bit 0 survives
+the round-trip.
+
+```
+key:   0x01F0  (capabilities)
+value: UInt16 bitmask, bit 0 = CAPABILITY_LARGE_FILES (0x0001)
+```
+
+Other fogWraith bits (`textEncoding 0x0002`, `voice 0x0004`, `inlineMedia 0x0008`,
+`chatHistory 0x0010`, `extendedPriv 0x0020`) are **reserved, not implemented** by
+Heidrun. This `0x01F0` channel is separate from Heidrun's `0xE000` band and from
+`resourceForkSupport` (`0xE002`) — they coexist and are negotiated independently.
+
+### 64-bit companion fields
+
+When large-file mode is active, replies carry these **alongside** the legacy
+32-bit fields (which clamp to `0xFFFFFFFF`):
+
+| Field key | Name | Type | Carried in |
+|-----------|------|------|------------|
+| `0x01F1` | `fileSize64` | `UInt64` | file list (200), get-info (206) |
+| `0x01F2` | `offset64` | `UInt64` | download request (resume offset) |
+| `0x01F3` | `xferSize64` | `UInt64` | download reply (202), upload request (203) |
+| `0x01F4` | `folderItemCount64` | `UInt64` | reserved — folder transfers not yet 64-bit |
+
+In **Get File Name List** (200) each `fileSize64` is a **separate field appended
+after** its `fileListEntry` blob (the in-blob 32-bit size clamps); a decoder pairs
+each entry with the immediately-following `fileSize64`.
+
+### HTXF handshake — 24-byte variant
+
+The HTXF side-channel preamble grows from 16 to 24 bytes. The previously-reserved
+bytes 12–15 become a flags word; an 8-byte length follows when `SIZE64` is set:
+
+```
+[0..3]   "HTXF"
+[4..7]   UInt32 transferID
+[8..11]  UInt32 legacy length   (set to 0 when the true length > 0xFFFFFFFF)
+[12..15] UInt32 flags           (HTXF_FLAG_LARGE_FILE 0x1 | HTXF_FLAG_SIZE64 0x2)
+[16..23] UInt64 length          (present only when SIZE64 is set)
+```
+
+A 16-byte preamble (no `SIZE64`) is exactly the legacy handshake — byte-identical,
+so legacy transfers are unchanged. A receiver reads the 16-byte head, and only
+reads 8 more bytes when `SIZE64` is set in the flags word.
+
+### FFO fork headers — 64-bit length
+
+The 16-byte FILP/INFO/**DATA**/**MACR** fork header carries a 64-bit fork length by
+splitting it across the two length slots — **high 32 bits at offset 4–7** (the
+first reserved word), **low 32 bits at offset 12–15**:
+
+```
+[0..3]   fork magic ("DATA" / "MACR")
+[4..7]   UInt32 high32(length)
+[8..11]  4 reserved/zero bytes
+[12..15] UInt32 low32(length)        →  length = (high << 32) | low
+```
+
+For files ≤ 4 GiB the high word is zero, so the bytes are **identical** to the
+historical 32-bit-only header. This is how a framed (resource-fork) single-file
+download of a > 4 GiB file round-trips.
+
+### Affected transactions and modes
+
+| Transaction | ID | Large-file behaviour |
+|-------------|----|----------------------|
+| `login` | 107 | negotiate `0x01F0` |
+| Get File Name List | 200 | append `fileSize64` per entry |
+| Download File | 202 | 64-bit reply size + 24-byte HTXF; framed envelope uses 64-bit fork headers |
+| Upload File | 203 | client sends `xferSize64`; **> 4 GiB uploads ship the raw data fork** (no FILP/INFO/DATA/MACR wrapper) — so a > 4 GiB upload is **data-fork only** (no resource fork) |
+| Get File Info | 206 | append `fileSize64` |
+
+Resume offsets > 4 GiB ride `offset64` (`0x01F2`); the legacy `fileResumeInfo`
+structure stays 32-bit. **Folder** transfers (210 / 213) are **not** 64-bit yet —
+`folderItemCount64` is reserved for that future work.
+
+### Compatibility matrix
+
+| Client | Server | Result |
+|--------|--------|--------|
+| sends `0x01F0` bit 0 | echoes bit 0 | ✅ > 4 GiB transfers; both 32+64-bit fields sent |
+| sends bit 0 | no echo | client stays 32-bit; > 4 GiB refused client-side (can't be represented) |
+| no `0x01F0` | sends 64-bit fields | client ignores them, reads the clamped 32-bit value |
+| legacy | legacy | unchanged |
+
+---
+
 ## Versioning
 
 | Extension   | Introduced |
 |-------------|------------|
 | `0xE000` field band, `userEmoji` | `heidrun-protocol` **v1.0.0-rc7**, `heidrun-server` **v1.0.0-rc5** (2026-05) |
 | `0xE002` `resourceForkSupport`   | `heidrun-protocol` **v1.0.0-rc14** (2026-06), `heidrun-server` next rc |
+| `largeFiles` (`0x01F0`–`0x01F4`, 24-byte HTXF, 64-bit fork headers) | `heidrun-protocol` **v1.0.0-rc27**, `heidrun-server` **v1.0.0** (server build pinned rc28), client pinned rc29 (2026-06). rc28 = > 4 GiB framed-download fix; rc29 = `largeFilesEnabled` on the client protocol surface |
 
-When adding a new extension: append a field key in the `0xE000` band, document
-it here with its wire layout, keep it additive (omittable / trailing), and make
-sure a peer that ignores it still gets correct standard behaviour.
+When adding a new **Heidrun** extension: append a field key in the `0xE000` band,
+document it here with its wire layout, keep it additive (omittable / trailing),
+and make sure a peer that ignores it still gets correct standard behaviour.
+Adopted external extensions (like `largeFiles`) follow their upstream namespace
+instead of the `0xE000` band — note that explicitly, as above.
