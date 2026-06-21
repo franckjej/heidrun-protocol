@@ -23,9 +23,14 @@ public actor HotlineProtocolEngine {
     private let packetObserver: PacketObserver?
 
     /// String encoding for every wire-level string field. Lives here so the
-    /// engine's dispatch can decode pushes; the owning client reads it for
-    /// its own outbound encoding (avoids passing it through every call).
-    public nonisolated let stringEncoding: String.Encoding
+    /// engine's dispatch can decode pushes. Mutable so it can flip from
+    /// macOS Roman to UTF-8 once the server echoes
+    /// `CapabilityFlags.textEncoding` on the login reply — see the flip in
+    /// `dispatch(header:body:)`. It's only ever read/written inside the
+    /// actor-isolated `dispatch` (the read loop is serial on the actor), so
+    /// dropping `nonisolated` here is race-free: every inbound packet is
+    /// decoded with whatever encoding the previous packet left in place.
+    public private(set) var stringEncoding: String.Encoding
 
     private var nextTaskNumber: UInt32 = 1
     private var pendingReplies: [UInt32: CheckedContinuation<[PacketField], Error>] = [:]
@@ -63,6 +68,9 @@ public actor HotlineProtocolEngine {
     }
 
     public var lastTaskNumber: UInt32 { nextTaskNumber &- 1 }
+    /// Current inbound decode encoding. Exposed for tests to assert the
+    /// post-login flip from macOS Roman to UTF-8.
+    public var currentStringEncoding: String.Encoding { stringEncoding }
     public var publicChatSubjectValue: String { publicChatSubject }
     public var selfPrivilegesValue: UserPrivileges { selfPrivileges }
     public var isTorn: Bool { torn }
@@ -161,6 +169,17 @@ public actor HotlineProtocolEngine {
         // Reply correlation: if we have a pending continuation for this
         // task number, hand it the fields (or surface the server error).
         if let continuation = pendingReplies.removeValue(forKey: header.taskNumber) {
+            // Text-encoding negotiation (fogWraith CAPABILITY_TEXT_ENCODING):
+            // only the login reply carries `.capabilities`. If the server
+            // echoes the textEncoding bit, flip inbound decoding to UTF-8 for
+            // every push AFTER this reply. Done here — before resuming the
+            // continuation — and serially on the actor, so there's no window
+            // where a later push is decoded with the stale encoding. The
+            // login reply itself was already decoded above (still macOS
+            // Roman, as intended). Flipping to .utf8 is idempotent.
+            if CapabilityFlags.negotiatedTextEncoding(echoed: fields.uint16(.capabilities)) {
+                stringEncoding = .utf8
+            }
             if header.errorID != 0 {
                 let message = fields.string(.errorMessage, encoding: stringEncoding)
                 let typed = HotlineError.fromWire(
