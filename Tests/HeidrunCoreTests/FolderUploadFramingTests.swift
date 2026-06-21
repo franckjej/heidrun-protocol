@@ -82,6 +82,26 @@ struct FolderUploadFramingTests {
         #expect(isDir == 1)
     }
 
+    @Test("legacy per-item size prefix is a 4-byte big-endian UInt32")
+    func itemSizePrefixLegacy() {
+        let prefix = FolderUploadFraming.encodeItemSizePrefix(0x0001_0203, largeFile: false)
+        #expect(Array(prefix) == [0x00, 0x01, 0x02, 0x03])
+    }
+
+    @Test("large-file per-item size prefix is an 8-byte big-endian UInt64")
+    func itemSizePrefixLargeFile() {
+        // A >4 GiB total so the high word is non-zero.
+        let total: UInt64 = 0x1_0000_009E
+        let prefix = FolderUploadFraming.encodeItemSizePrefix(total, largeFile: true)
+        #expect(Array(prefix) == [0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x9E])
+    }
+
+    @Test("legacy item size prefix clamps a >4 GiB total to UInt32 max")
+    func itemSizePrefixLegacyClamps() {
+        let prefix = FolderUploadFraming.encodeItemSizePrefix(0x1_0000_0000, largeFile: false)
+        #expect(Array(prefix) == [0xFF, 0xFF, 0xFF, 0xFF])
+    }
+
     @Test("ItemAction raw values match the protocol")
     func itemActionRawValues() {
         #expect(FolderUploadFraming.ItemAction.upload.rawValue == 1)

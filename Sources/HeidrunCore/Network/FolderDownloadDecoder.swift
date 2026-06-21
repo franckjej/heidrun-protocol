@@ -107,6 +107,7 @@ public enum FolderDownloadDecoder {
     public static func drive(
         actor: FileTransferActor,
         encoding: String.Encoding,
+        largeFile: Bool = false,
         resumeProvider: FolderDownloadResumeProvider? = nil,
         progress: (@Sendable (Int) async -> Void)? = nil,
         continuation: AsyncThrowingStream<FolderDownloadItem, Error>.Continuation
@@ -116,6 +117,7 @@ public enum FolderDownloadDecoder {
                 guard let item = try await readItem(
                     actor: actor,
                     encoding: encoding,
+                    largeFile: largeFile,
                     resumeProvider: resumeProvider,
                     progress: progress
                 ) else {
@@ -151,6 +153,7 @@ public enum FolderDownloadDecoder {
     private static func readItem(
         actor: FileTransferActor,
         encoding: String.Encoding,
+        largeFile: Bool = false,
         resumeProvider: FolderDownloadResumeProvider?,
         progress: (@Sendable (Int) async -> Void)? = nil
     ) async throws -> FolderDownloadItem? {
@@ -174,9 +177,12 @@ public enum FolderDownloadDecoder {
         try await actor.sendBytes(encodeFileAck(resume: resume))
         let dataForkOffset = resume?.dataForkOffset ?? 0
 
-        // File path: itemFileSize, then FILP + INFO + DATA + MACR.
-        let itemFileSizeBytes = try await actor.receiveExactly(4)
-        _ = itemFileSizeBytes  // size lives inside the FILP block; this is informational.
+        // File path: itemFileSize prefix, then FILP + INFO + DATA + MACR.
+        // Legacy sessions announce the prefix as a UInt32; large-file
+        // sessions widen it to a UInt64. The value is informational (the
+        // authoritative fork lengths live in the DATA/MACR headers), so we
+        // read past it without using it beyond keeping the cursor aligned.
+        _ = try await actor.receiveExactly(largeFile ? 8 : 4)
 
         let filp = try await actor.receiveExactly(40)
         var filpCursor = ByteCursor(data: filp, offset: 36)
@@ -185,9 +191,15 @@ public enum FolderDownloadDecoder {
         let infoBytes = try await actor.receiveExactly(Int(infoLength))
         let meta = parseInfoBlock(infoBytes, encoding: encoding)
 
+        // Read DATA + MACR fork lengths via the 64-bit fork-header helper:
+        // the high word lives at offset 4-7, the low word at 12-15. For a
+        // legacy ≤4 GiB header the high word is zero, so the value matches
+        // the historical plain-UInt32 read at offset 12.
         let dataHeader = try await actor.receiveExactly(16)
-        var dataCursor = ByteCursor(data: dataHeader, offset: 12)
-        let dataLength: UInt32 = dataCursor.readBigEndian()
+        let dataLength = UploadFraming.forkLength(from: dataHeader)
+        guard dataLength <= UInt64(Int.max) else {
+            throw HotlineError.malformedReply(reason: "folder item data fork length overflows Int")
+        }
         // Read the data fork in windows so callers can show live progress
         // instead of a single jump when the whole file lands. `progress`
         // reports the byte delta of each window.
@@ -203,8 +215,10 @@ public enum FolderDownloadDecoder {
         }
 
         let macrHeader = try await actor.receiveExactly(16)
-        var macrCursor = ByteCursor(data: macrHeader, offset: 12)
-        let resLength: UInt32 = macrCursor.readBigEndian()
+        let resLength = UploadFraming.forkLength(from: macrHeader)
+        guard resLength <= UInt64(Int.max) else {
+            throw HotlineError.malformedReply(reason: "folder item resource fork length overflows Int")
+        }
         let resourceFork: Data = resLength > 0
             ? try await actor.receiveExactly(Int(resLength))
             : Data()

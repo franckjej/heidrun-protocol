@@ -60,6 +60,22 @@ public enum FolderUploadFraming {
         return out
     }
 
+    /// Encode the per-item total-size prefix that precedes each item's
+    /// FILP block. Legacy sessions write a big-endian `UInt32` (clamped
+    /// for safety, though a non-large-file item is always ≤4 GiB);
+    /// large-file sessions write a big-endian `UInt64` so a >4 GiB item
+    /// can announce its true size. The ≤4 GiB / legacy bytes are
+    /// byte-identical to the historical 4-byte prefix.
+    public static func encodeItemSizePrefix(_ total: UInt64, largeFile: Bool) -> Data {
+        var out = Data()
+        if largeFile {
+            out.appendBigEndian(total)
+        } else {
+            out.appendBigEndian(UInt32(clamping: total))
+        }
+        return out
+    }
+
     /// Sentinel the server replies with after each item header. The
     /// values are not contiguous on purpose so a corrupt cast can't slip
     /// through: 1 = upload, 2 = resume, 3 = skip.

@@ -153,6 +153,73 @@ struct FolderDownloadResumeIntegrationTests {
         serverConn.cancel()
     }
 
+    @Test("large-file mode reads the 8-byte item prefix and 64-bit fork headers")
+    func largeFileItemFraming() async throws {
+        let server = try await MiniHotlineServer.start()
+        defer { server.stop() }
+
+        async let acceptedConnection = server.acceptNextConnection()
+
+        let clientQueue = DispatchQueue(label: "test.transfer.client.large")
+        let clientConnection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: NWEndpoint.Port(rawValue: server.port)!,
+            using: .tcp
+        )
+        try await clientConnection.startAndWaitForReady(on: clientQueue)
+        let serverConn = try await acceptedConnection
+
+        let actor = FileTransferActor(
+            connection: clientConnection,
+            queue: clientQueue,
+            transferID: 1,
+            totalSize: 0
+        )
+
+        // Synthetic small forks, but framed with the large-file dialect:
+        // an 8-byte item-size prefix and the 64-bit (high/low split) DATA
+        // and MACR fork headers produced by UploadFraming.forkHeader.
+        let dataFork = Data([0x11, 0x22, 0x33, 0x44, 0x55])
+        let resourceFork = Data([0xCA, 0xFE])
+
+        async let serverWork: Void = playFolderTape(
+            on: serverConn,
+            files: [
+                .init(name: "big.bin", data: dataFork, expectedAction: .download, resourceFork: resourceFork)
+            ],
+            largeFile: true
+        )
+
+        let (stream, continuation) = AsyncThrowingStream<FolderDownloadItem, Error>.makeStream()
+        async let driveDone: Void = FolderDownloadDecoder.drive(
+            actor: actor,
+            encoding: .macOSRoman,
+            largeFile: true,
+            resumeProvider: nil,
+            continuation: continuation
+        )
+
+        var items: [FolderDownloadItem] = []
+        let collector = Task {
+            for try await item in stream {
+                items.append(item)
+            }
+            return items
+        }
+
+        await driveDone
+        continuation.finish()
+        try await serverWork
+        let collected = try await collector.value
+
+        #expect(collected.count == 1)
+        #expect(collected[0].data == dataFork)
+        #expect(collected[0].resourceFork == resourceFork)
+
+        await actor.cancel()
+        serverConn.cancel()
+    }
+
     // MARK: - Tape helpers
 
     private struct TapeFile {
@@ -172,7 +239,8 @@ struct FolderDownloadResumeIntegrationTests {
     /// the UInt16 0 sentinel at the end.
     private func playFolderTape(
         on connection: NWConnection,
-        files: [TapeFile]
+        files: [TapeFile],
+        largeFile: Bool = false
     ) async throws {
         for file in files {
             try await sendItemHeader(connection, name: file.name)
@@ -181,7 +249,8 @@ struct FolderDownloadResumeIntegrationTests {
                 connection,
                 name: file.name,
                 data: file.data,
-                resourceFork: file.resourceFork
+                resourceFork: file.resourceFork,
+                largeFile: largeFile
             )
         }
         var end = Data()
@@ -226,7 +295,8 @@ struct FolderDownloadResumeIntegrationTests {
         _ connection: NWConnection,
         name: String,
         data: Data,
-        resourceFork: Data = Data()
+        resourceFork: Data = Data(),
+        largeFile: Bool = false
     ) async throws {
         let info = buildInfoBlock(name: name)
         var filp = Data()
@@ -234,18 +304,19 @@ struct FolderDownloadResumeIntegrationTests {
         filp.append(Data(repeating: 0, count: 32))
         filp.appendBigEndian(UInt32(info.count))              // infoLength at offset 36
 
-        var dataHeader = Data()
-        dataHeader.append(contentsOf: [0x44, 0x41, 0x54, 0x41])  // "DATA"
-        dataHeader.append(Data(repeating: 0, count: 8))
-        dataHeader.appendBigEndian(UInt32(data.count))           // length at offset 12
-
-        var macrHeader = Data()
-        macrHeader.append(contentsOf: [0x4D, 0x41, 0x43, 0x52])  // "MACR"
-        macrHeader.append(Data(repeating: 0, count: 8))
-        macrHeader.appendBigEndian(UInt32(resourceFork.count))   // resource fork length
+        // Fork headers carry the length 64-bit (high word at offset 4-7,
+        // low at 12-15) via UploadFraming.forkHeader — for these small
+        // forks the high word is zero, matching the legacy on-wire layout.
+        let dataHeader = UploadFraming.forkHeader(magic: "DATA", length: UInt64(data.count))
+        let macrHeader = UploadFraming.forkHeader(magic: "MACR", length: UInt64(resourceFork.count))
 
         var body = Data()
-        body.appendBigEndian(UInt32(data.count))   // itemFileSize (informational)
+        // itemFileSize prefix: UInt64 in large-file mode, UInt32 otherwise.
+        if largeFile {
+            body.appendBigEndian(UInt64(data.count))
+        } else {
+            body.appendBigEndian(UInt32(data.count))
+        }
         body.append(filp)
         body.append(info)
         body.append(dataHeader)
