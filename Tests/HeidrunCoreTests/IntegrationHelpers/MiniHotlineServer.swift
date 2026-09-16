@@ -28,13 +28,31 @@ final class MiniHotlineServer: @unchecked Sendable {
     private var pendingConnections: [NWConnection] = []
     private var pendingAccepts: [CheckedContinuation<NWConnection, Error>] = []
 
-    private init() throws {
+    private init(port: UInt16?) throws {
         self.queue = DispatchQueue(label: "MiniHotlineServer")
-        self.listener = try NWListener(using: .tcp)
+        if let port, let endpointPort = NWEndpoint.Port(rawValue: port) {
+            self.listener = try NWListener(using: .tcp, on: endpointPort)
+        } else {
+            self.listener = try NWListener(using: .tcp)
+        }
     }
 
-    static func start() async throws -> MiniHotlineServer {
-        let server = try MiniHotlineServer()
+    /// Start a control-channel server on a random port plus a second
+    /// listener on `port + 1`, where real clients dial the HTXF side
+    /// channel. Retries with a fresh random port when `port + 1` is taken.
+    static func startWithTransferPort() async throws -> (control: MiniHotlineServer, transfer: MiniHotlineServer) {
+        for _ in 0..<8 {
+            let control = try await start()
+            if let transfer = try? await start(port: control.port + 1) {
+                return (control, transfer)
+            }
+            control.stop()
+        }
+        throw Failure.noPort
+    }
+
+    static func start(port: UInt16? = nil) async throws -> MiniHotlineServer {
+        let server = try MiniHotlineServer(port: port)
 
         server.listener.newConnectionHandler = { [weak server] conn in
             server?.queueIncoming(conn)

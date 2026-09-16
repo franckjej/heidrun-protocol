@@ -50,7 +50,7 @@ naturally). This is what makes the extensions safe to send to any peer.
 |-----------|-------------|-------------|------------------|
 | `0xE000`  | `userEmoji` | UTF-8 string | protocol rc7 / server rc5 |
 | `0xE001`  | `errorKind` | `UInt16`    | protocol rc12 |
-| `0xE002`  | `resourceForkSupport` | `UInt8` (= 1) | protocol rc14 / server tbd (2026-06) |
+| `0xE002`  | `resourceForkSupport` | `UInt8` (= 1) | protocol rc14 (2026-06); legacy since 1.1.1 (2026-09) |
 
 ---
 
@@ -168,14 +168,17 @@ never clears the other unintentionally.
 
 ---
 
-## `resourceForkSupport` — framed single-file downloads
+## `resourceForkSupport` — legacy download-framing flag
 
-Capability flag advertising that an endpoint supports the FILP/INFO/DATA/MACR
-envelope on **single-file downloads** (TX 202). When both peers send it, the
-side channel for a single-file download ships the framed envelope and the
-resource fork survives end-to-end. When either side omits it, the side channel
-falls back to **raw data-fork bytes** — the classic Heidrun dialect — and the
-resource fork can't be carried (use a one-item folder download for that case).
+**Status: legacy (2026-09).** Classic Hotline always ships the
+FILP/INFO/DATA/MACR flattened file object on single-file downloads (TX 202),
+fresh or resumed — see hldoc and fogWraith's large-file spec. heidrun-server
+≤ 1.5 deviated: it sent a **bare data fork** unless both peers exchanged this
+flag, and Heidrun clients ≤ 1.4 mirrored that, which corrupted every download
+from a classic server (the envelope landed on disk). Since protocol 1.1.1 /
+server 1.5.1 / client 1.4.1 the envelope is unconditional on both sides. The
+flag is still sent by clients and echoed by servers purely so mixed old/new
+pairs keep framing; new implementations may ignore its value.
 
 ### Field
 
@@ -184,55 +187,42 @@ key:   0xE002  (resourceForkSupport)
 value: UInt8 == 1
 ```
 
-The single-byte value is `1` whenever present; future flags can be packed into
-extra bits if the need arises. A receiver that finds any other value should
-treat it as "not supported".
-
 ### Where it travels
 
-**Client → server**
+Client → server on `login` (107) and `agreeToAgreement` (121); server → client
+echoed on the `login` reply. Presence of the echo has no wire effect for a
+current peer.
 
-| Transaction | ID  | `resourceForkSupport` presence |
-|-------------|-----|--------------------------------|
-| `login`             | 107 | Send when the client can parse the framed envelope on download; omit otherwise. |
-| `agreeToAgreement`  | 121 | Same rule as login. |
-
-**Server → client**
-
-| Transaction | ID  | `resourceForkSupport` presence |
-|-------------|-----|--------------------------------|
-| `login` reply       | 107 | Server **echoes the field iff** it received it AND it can produce the framed envelope. The echo is the negotiated handshake. |
-
-A session is "framed" only when the server echoes the field back on the login
-reply. Without the echo the client must read the download side channel as raw
-bytes (the historical Heidrun dialect).
-
-### Wire effect when negotiated
+### Wire format of a single-file download
 
 On a successful TX 202 (`downloadFile`):
 
-1. The reply's `transferSize` is the **whole envelope length** computed by
-   `UploadFraming.totalSize(nameLength:dataLength:resourceLength:)`, not just
-   the data-fork length.
-2. The HTXF side channel carries the standard 16-byte preamble followed by the
-   FILP+INFO+DATA+resource-fork+MACR bytes the same encoder produces for
-   uploads. The decoder (`UploadFraming.decode`) is symmetric.
+1. The reply's `transferSize` (108) — and `xferSize64` (0x01F3) when large
+   files are negotiated — is the **whole envelope length**, not the data-fork
+   length (`fileSize` 207 / `fileSize64` 0x01F1 carry that).
+2. The HTXF side channel carries the 16-byte preamble followed by the
+   envelope: `FILP` header, INFO fork, DATA fork, and a MACR fork when the
+   file has a resource fork. Fork count lives in the `FILP` header; two-fork
+   envelopes (no MACR) are valid and common.
+3. A resumed download ships a *resumed* envelope: full INFO, then a DATA
+   fork header sized to the remainder followed by the bytes from the offset,
+   then the full MACR fork if any.
 
-When **not** negotiated, the side channel after the preamble is the raw data
-fork from the requested offset onwards — byte-for-byte identical to the
-pre-extension behaviour, so legacy clients keep working with no change.
+Decoders MUST size their reads from the fork headers, never from the outer
+transfer size — at least one server in the wild puts the file size in
+`xferSize64`. `FlattenedFileStream` in HeidrunCore does this and streams the
+data fork in windows.
 
 ### Compatibility matrix
 
-| Sender client | Server      | Result |
-|---------------|-------------|--------|
-| Heidrun (sends 0xE002) | Heidrun (echoes 0xE002) | ✅ framed single-file downloads; resource fork carried |
-| Heidrun       | legacy / non-echoing | client sees no echo → expects raw bytes → no resource fork (same as today) |
-| legacy        | Heidrun     | server sees no flag → server emits raw bytes → no resource fork (same as today) |
-| legacy        | legacy      | unchanged |
-
-In every row the data fork still arrives correctly; only the resource fork is
-gated on the negotiation.
+| Client | Server | Result |
+|--------|--------|--------|
+| ≥ 1.4.1 | classic / ≥ 1.5.1 | ✅ envelope decoded, resource fork carried |
+| ≥ 1.4.1 | heidrun ≤ 1.5 | ✅ flag echoed → server frames → decoded |
+| ≤ 1.4 | classic / ≥ 1.5.1 | ❌ envelope written to disk (the bug this note documents) |
+| ≤ 1.4 | heidrun ≤ 1.5 | ✅ flag negotiated → framed |
+| classic (Hotline 1.2.3, Nostalgia…) | ≥ 1.5.1 | ✅ envelope, as the spec requires |
+| classic | heidrun ≤ 1.5 | ❌ bare fork misparsed as `FILP` |
 
 ---
 

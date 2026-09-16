@@ -116,12 +116,10 @@ public struct TransferHandle: Sendable, Hashable, Identifiable {
     /// Total bytes the server expects to send / receive.
     public let totalSize: UInt64
 
-    /// `true` when the side channel for this transfer ships the FILP
-    /// envelope (data fork + resource fork + metadata) rather than raw
-    /// data-fork bytes. Set by `startDownload(...)` when the session
-    /// negotiated `resourceForkSupport`. `downloadStream(for:)` reads
-    /// this to transparently extract the data fork; `downloadEnvelope`
-    /// requires `framed == true`.
+    /// `true` when the side channel ships the FILP envelope (data fork
+    /// + resource fork + metadata). Always `true` for downloads: classic
+    /// Hotline servers and heidrun-server alike frame single-file
+    /// downloads, fresh or resumed.
     public let framed: Bool
 
     public init(transferID: UInt32, totalSize: UInt64, framed: Bool = false) {
@@ -435,28 +433,22 @@ public protocol HotlineClient: Sendable {
     #endif
 
     /// Download a single file as a fully-parsed `UploadEnvelope`
-    /// (data fork + resource fork + metadata). Requires the session to
-    /// have negotiated `resourceForkSupport` on login — check
-    /// `serverSupportsResourceForks` first. Buffers the whole envelope
+    /// (data fork + resource fork + metadata). Buffers the data fork
     /// in memory; for multi-GB downloads use `downloadStream` and
-    /// accept losing the resource fork.
+    /// claim the resource fork afterward via `consumeResourceFork`.
     func downloadEnvelope(for handle: TransferHandle) async throws -> UploadEnvelope
 
-    /// Claim the resource fork buffered during the most recent framed
+    /// Claim the resource fork buffered during the most recent
     /// `downloadStream(for:)`. Read-once: subsequent calls return an
-    /// empty `Data`. Always empty for non-framed handles, files with
-    /// no resource fork, or sessions that didn't negotiate
-    /// `resourceForkSupport`. Lets callers stream the data fork
-    /// through `downloadStream` for progress and pick up the resource
+    /// empty `Data`, as do files with no resource fork. Lets callers
+    /// stream the data fork for progress and pick up the resource
     /// fork afterward.
     func consumeResourceFork(for transferID: UInt32) async -> Data
 
     /// `true` after a `login(...)` against a server that echoed the
     /// `resourceForkSupport` capability (Heidrun extension 0xE002).
-    /// When set, `startDownload(...)` returns a `TransferHandle` whose
-    /// side channel ships the FILP/INFO/DATA/MACR envelope, suitable
-    /// for `downloadEnvelope(for:)`. When unset the side channel is
-    /// raw data-fork bytes and only `downloadStream(for:)` works.
+    /// Informational: downloads always decode the FILP envelope. The
+    /// flag is still sent so heidrun-server ≤ 1.5 frames its downloads.
     var serverSupportsResourceForks: Bool { get async }
 
     /// `true` after a `login(...)` against a server that echoed the

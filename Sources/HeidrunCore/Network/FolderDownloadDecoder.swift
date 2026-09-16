@@ -75,17 +75,9 @@ public typealias FolderDownloadResumeProvider = @Sendable ([String]) -> ResumeIn
 ///
 /// ```text
 /// UInt32 itemFileSize        // total remaining bytes for this item
-/// 40-byte FILP header (last 4 bytes = UInt32 infoBlockLength)
-/// infoBlockLength bytes:
-///   "AMAC" + UInt32 type + UInt32 creator + 40 reserved
-///   + UInt16 baseYear + 2 reserved + UInt32 creationDateSecs
-///   + UInt16 baseYear + 2 reserved + UInt32 modificationDateSecs
-///   + 2 reserved + UInt16 nameLen + name + UInt16 commentLen + comment
-/// 16-byte DATA fork header (last 4 bytes = UInt32 dataLength)
-/// dataLength bytes of data fork
-/// 16-byte MACR fork header (last 4 bytes = UInt32 resourceLength)
-/// resourceLength bytes of resource fork  (surfaced on the yielded
-///                                          item as `resourceFork`)
+/// FILP envelope (see `FlattenedFileStream`): INFO + DATA forks, plus
+/// MACR when the file has a resource fork (surfaced on the yielded
+/// item as `resourceFork`)
 /// ```
 public enum FolderDownloadDecoder {
 
@@ -177,63 +169,37 @@ public enum FolderDownloadDecoder {
         try await actor.sendBytes(encodeFileAck(resume: resume))
         let dataForkOffset = resume?.dataForkOffset ?? 0
 
-        // File path: itemFileSize prefix, then FILP + INFO + DATA + MACR.
+        // File path: itemFileSize prefix, then the FILP envelope.
         // Legacy sessions announce the prefix as a UInt32; large-file
         // sessions widen it to a UInt64. The value is informational (the
-        // authoritative fork lengths live in the DATA/MACR headers), so we
+        // authoritative fork lengths live in the fork headers), so we
         // read past it without using it beyond keeping the cursor aligned.
         _ = try await actor.receiveExactly(largeFile ? 8 : 4)
 
-        let filp = try await actor.receiveExactly(40)
-        var filpCursor = ByteCursor(data: filp, offset: 36)
-        let infoLength: UInt32 = filpCursor.readBigEndian()
-
-        let infoBytes = try await actor.receiveExactly(Int(infoLength))
-        let meta = parseInfoBlock(infoBytes, encoding: encoding)
-
-        // Read DATA + MACR fork lengths via the 64-bit fork-header helper:
-        // the high word lives at offset 4-7, the low word at 12-15. For a
-        // legacy ≤4 GiB header the high word is zero, so the value matches
-        // the historical plain-UInt32 read at offset 12.
-        let dataHeader = try await actor.receiveExactly(16)
-        let dataLength = UploadFraming.forkLength(from: dataHeader)
-        guard dataLength <= UInt64(Int.max) else {
-            throw HotlineError.malformedReply(reason: "folder item data fork length overflows Int")
-        }
-        // Read the data fork in windows so callers can show live progress
-        // instead of a single jump when the whole file lands. `progress`
-        // reports the byte delta of each window.
+        // The envelope decoder sizes every read from the fork headers and
+        // hands the data fork over in windows so callers can show live
+        // progress instead of a single jump when the whole file lands.
         var dataFork = Data()
-        dataFork.reserveCapacity(Int(dataLength))
-        var remainingData = Int(dataLength)
-        let window = 64 * 1024
-        while remainingData > 0 {
-            let chunk = try await actor.receiveExactly(min(window, remainingData))
-            dataFork.append(chunk)
-            remainingData -= chunk.count
-            await progress?(chunk.count)
-        }
-
-        let macrHeader = try await actor.receiveExactly(16)
-        let resLength = UploadFraming.forkLength(from: macrHeader)
-        guard resLength <= UInt64(Int.max) else {
-            throw HotlineError.malformedReply(reason: "folder item resource fork length overflows Int")
-        }
-        let resourceFork: Data = resLength > 0
-            ? try await actor.receiveExactly(Int(resLength))
-            : Data()
+        let envelope = try await FlattenedFileStream.decode(
+            readExactly: { try await actor.receiveExactly($0) },
+            encoding: encoding,
+            onData: { chunk in
+                dataFork.append(chunk)
+                await progress?(chunk.count)
+            }
+        )
 
         return FolderDownloadItem(
             relativePath: parsed.components,
             isDirectory: false,
             data: dataFork,
-            resourceFork: resourceFork,
+            resourceFork: envelope.resourceFork,
             dataForkOffset: dataForkOffset,
-            type: FourCharCode(rawValue: meta.type),
-            creator: FourCharCode(rawValue: meta.creator),
-            creationDate: HotlineDate.decode(baseYear: meta.creBaseYear, seconds: meta.creSeconds),
-            modificationDate: HotlineDate.decode(baseYear: meta.modBaseYear, seconds: meta.modSeconds),
-            comment: meta.comment
+            type: envelope.metadata.type,
+            creator: envelope.metadata.creator,
+            creationDate: envelope.metadata.creationDate,
+            modificationDate: envelope.metadata.modificationDate,
+            comment: envelope.metadata.comment
         )
     }
 
@@ -262,55 +228,6 @@ public enum FolderDownloadDecoder {
         return ParsedItemHeader(
             isDirectory: folderType.isMultiple(of: 2) == false,
             components: components
-        )
-    }
-
-    struct InfoBlockMetadata {
-        let type: UInt32
-        let creator: UInt32
-        let creBaseYear: UInt16
-        let creSeconds: UInt32
-        let modBaseYear: UInt16
-        let modSeconds: UInt32
-        let name: String
-        let comment: String
-    }
-
-    /// Parse the INFO block that follows the 40-byte FILP header.
-    /// Layout transcribed from HETransferThread.m line 365+.
-    static func parseInfoBlock(_ data: Data, encoding: String.Encoding) -> InfoBlockMetadata {
-        var cursor = ByteCursor(data: data)
-        _ = cursor.readData(count: 4)                  // "AMAC"
-        let type: UInt32 = cursor.readBigEndian()
-        let creator: UInt32 = cursor.readBigEndian()
-        _ = cursor.readData(count: 40)                 // 4 reserved + UInt32 256 + 32 reserved
-
-        let creBaseYear: UInt16 = cursor.readBigEndian()
-        _ = cursor.readData(count: 2)                  // reserved
-        let creSeconds: UInt32 = cursor.readBigEndian()
-
-        let modBaseYear: UInt16 = cursor.readBigEndian()
-        _ = cursor.readData(count: 2)                  // reserved
-        let modSeconds: UInt32 = cursor.readBigEndian()
-        _ = cursor.readData(count: 2)                  // reserved
-
-        let nameLen: UInt16 = cursor.readBigEndian()
-        let nameBytes = cursor.readData(count: Int(nameLen))
-        let name = String(data: nameBytes, encoding: encoding) ?? ""
-
-        let commentLen: UInt16 = cursor.remaining >= 2 ? cursor.readBigEndian() : 0
-        let commentBytes = cursor.readData(count: Int(commentLen))
-        let comment = String(data: commentBytes, encoding: encoding) ?? ""
-
-        return InfoBlockMetadata(
-            type: type,
-            creator: creator,
-            creBaseYear: creBaseYear,
-            creSeconds: creSeconds,
-            modBaseYear: modBaseYear,
-            modSeconds: modSeconds,
-            name: name,
-            comment: comment
         )
     }
 }

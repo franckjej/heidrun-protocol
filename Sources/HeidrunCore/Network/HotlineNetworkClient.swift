@@ -39,15 +39,16 @@ public actor HotlineNetworkClient: HotlineClient {
     private var serverVersion: Int = 0
     private var clientVersion: Int = 151
     /// `true` after the server echoed `.resourceForkSupport` on the TX
-    /// 107 login reply. When set, single-file downloads ship the
-    /// FILP/INFO/DATA/MACR envelope and carry the resource fork.
+    /// 107 login reply. Informational: downloads always decode the FILP
+    /// envelope; the echo only matters to heidrun-server ≤ 1.5, which
+    /// shipped a bare data fork unless it was negotiated.
     public private(set) var serverSupportsResourceForks: Bool = false
     /// `true` after the server echoed `.capabilities` with the
     /// `.largeFiles` bit set on the 107 login reply. When set, transfers
     /// over 4 GiB use the 24-byte HTXF handshake + 64-bit size fields.
     public private(set) var largeFilesEnabled: Bool = false
     var activeTransfers: [UInt32: FileTransferActor] = [:]
-    /// Resource-fork bytes recovered from a framed `downloadStream`
+    /// Resource-fork bytes recovered from a `downloadStream`
     /// after the FILP envelope has been decoded. Persists past the
     /// activeTransfers cleanup so the caller can `consumeResourceFork`
     /// once the stream has finished. Read-once semantics (the accessor
@@ -305,9 +306,8 @@ public actor HotlineNetworkClient: HotlineClient {
         if let socket = reply.uint16(.socket) {
             self.connectionSocket = socket
         }
-        // Capability negotiation (Heidrun extension 0xE002): the server
-        // only echoes the field when it actually supports the framed
-        // single-file download path. No echo = fall back to raw bytes.
+        // Heidrun extension 0xE002: kept so heidrun-server ≤ 1.5 ships
+        // the FILP envelope; classic servers always do.
         self.serverSupportsResourceForks = reply.uint8(.resourceForkSupport) == 1
         self.largeFilesEnabled = CapabilityFlags.negotiatedLargeFiles(echoed: reply.uint16(.capabilities))
         // Text-encoding negotiation (fogWraith CAPABILITY_TEXT_ENCODING):

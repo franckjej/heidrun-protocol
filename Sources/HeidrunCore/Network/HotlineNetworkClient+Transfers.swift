@@ -57,11 +57,9 @@ extension HotlineNetworkClient {
         let totalSize = reply.uint64(.xferSize64)
             ?? UInt64(reply.uint32(.transferSize) ?? 0)
 
-        // The session is framed iff the server echoed
-        // `resourceForkSupport` on login AND we requested a fresh
-        // download (resume + framed isn't a supported combo on the
-        // server side, so we match that).
-        let framed = serverSupportsResourceForks && resume.isFresh
+        // The side channel always carries the FILP envelope — classic
+        // Hotline servers and heidrun-server alike, fresh or resumed.
+        let framed = true
         let largeFile = largeFilesEnabled && totalSize > 0xFFFF_FFFF
         let actor = try await openSideChannel(
             transferID: transferID,
@@ -496,42 +494,42 @@ extension HotlineNetworkClient {
         bufferedResourceForks.removeValue(forKey: transferID) ?? Data()
     }
 
-    /// Download a single file as a fully-parsed `UploadEnvelope`. Only
-    /// valid for handles where `framed == true` (the session negotiated
-    /// `resourceForkSupport` on login).
-    ///
-    /// The whole envelope is buffered in memory before decoding. Fine
-    /// for typical Mac files (icons, documents); for multi-GB downloads
-    /// use `downloadStream(for:)` and accept the data-fork-only result.
+    /// Download a single file as a fully-parsed `UploadEnvelope` (data
+    /// fork + resource fork + metadata). Buffers the data fork in
+    /// memory; for multi-GB downloads use `downloadStream(for:)` and
+    /// claim the resource fork afterward via `consumeResourceFork`.
     public func downloadEnvelope(for handle: TransferHandle) async throws -> UploadEnvelope {
-        guard handle.framed else {
-            throw HotlineError.malformedReply(
-                reason: "downloadEnvelope requires a framed transfer; the session didn't negotiate resourceForkSupport"
-            )
-        }
         guard let actor = activeTransfers[handle.transferID] else {
             throw HotlineError.notConnected
         }
-        var buffer = Data()
-        buffer.reserveCapacity(Int(handle.totalSize))
+        activeTransfers.removeValue(forKey: handle.transferID)
+        var dataFork = Data()
+        let result: FlattenedFileStream.Result
         do {
-            for try await chunk in actor.bytes() {
-                buffer.append(chunk)
-                if buffer.count >= Int(handle.totalSize) { break }
-            }
+            result = try await FlattenedFileStream.decode(
+                readExactly: { try await actor.receiveExactly($0) },
+                encoding: stringEncoding,
+                onData: { dataFork.append($0) }
+            )
         } catch {
-            activeTransfers.removeValue(forKey: handle.transferID)
+            await actor.cancel()
             throw error
         }
-        activeTransfers.removeValue(forKey: handle.transferID)
-        return try UploadFraming.decode(buffer, encoding: stringEncoding)
+        await actor.cancel()
+        return UploadEnvelope(
+            fileName: result.metadata.fileName,
+            data: dataFork,
+            resourceFork: result.resourceFork,
+            type: result.metadata.type,
+            creator: result.metadata.creator
+        )
     }
 
-    /// Stream a download's data-fork bytes. Works in both modes —
-    /// against a non-framed handle the bytes pass through raw, against
-    /// a framed one the side channel is buffered + decoded and only the
-    /// data fork is yielded (the resource fork is silently dropped on
-    /// this path; use `downloadEnvelope` to keep it).
+    /// Stream a download's data-fork bytes. The side channel always
+    /// carries the FILP envelope; the decoder sizes its reads from the
+    /// fork headers, so a server that misreports the outer transfer
+    /// size can't truncate the file. The resource fork is stashed for
+    /// `consumeResourceFork`.
     nonisolated public func downloadStream(for handle: TransferHandle) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             Task { [weak self] in
@@ -543,42 +541,24 @@ extension HotlineNetworkClient {
                     continuation.finish(throwing: HotlineError.notConnected)
                     return
                 }
-                if handle.framed {
-                    var buffer = Data()
-                    buffer.reserveCapacity(Int(handle.totalSize))
-                    do {
-                        for try await chunk in actor.bytes() {
-                            buffer.append(chunk)
-                            if buffer.count >= Int(handle.totalSize) { break }
-                        }
-                        let encoding = await self.stringEncoding
-                        let envelope = try UploadFraming.decode(buffer, encoding: encoding)
-                        // Stash the resource fork so `consumeResourceFork`
-                        // can hand it to the caller after the stream
-                        // finishes. Skipped for empty forks to keep the
-                        // map honest about "has a fork to claim".
-                        if !envelope.resourceFork.isEmpty {
-                            await self.storeBufferedResourceFork(
-                                envelope.resourceFork,
-                                for: handle.transferID
-                            )
-                        }
-                        if !envelope.data.isEmpty {
-                            continuation.yield(envelope.data)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
+                // A consumer that drops its iterator tears the side
+                // channel down, which fails the pending read below.
+                continuation.onTermination = { _ in
+                    Task { await actor.cancel() }
+                }
+                let encoding = await self.stringEncoding
+                do {
+                    let result = try await FlattenedFileStream.decode(
+                        readExactly: { try await actor.receiveExactly($0) },
+                        encoding: encoding,
+                        onData: { continuation.yield($0) }
+                    )
+                    if !result.resourceFork.isEmpty {
+                        await self.storeBufferedResourceFork(result.resourceFork, for: handle.transferID)
                     }
-                } else {
-                    do {
-                        for try await chunk in actor.bytes() {
-                            continuation.yield(chunk)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
             }
         }

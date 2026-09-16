@@ -50,13 +50,12 @@ struct FolderDownloadDecoderTests {
             name: "test.txt",
             comment: "hello"
         )
-        let parsed = FolderDownloadDecoder.parseInfoBlock(info, encoding: .macOSRoman)
-        #expect(parsed.type == 0x54455854)
-        #expect(parsed.creator == 0x4D414352)
-        #expect(parsed.creBaseYear == 1904)
-        #expect(parsed.creSeconds == 100)
-        #expect(parsed.modSeconds == 200)
-        #expect(parsed.name == "test.txt")
+        let parsed = FlattenedFileStream.parseInfoBlock(info, encoding: .macOSRoman)
+        #expect(parsed.type == "TEXT")
+        #expect(parsed.creator == "MACR")
+        #expect(parsed.creationDate == HotlineDate.decode(baseYear: 1904, seconds: 100))
+        #expect(parsed.modificationDate == HotlineDate.decode(baseYear: 1904, seconds: 200))
+        #expect(parsed.fileName == "test.txt")
         #expect(parsed.comment == "hello")
     }
 
@@ -102,8 +101,8 @@ struct FolderDownloadDecoderTests {
         info.appendBigEndian(UInt16(3))
         info.append(contentsOf: [0x66, 0x6F, 0x6F])  // "foo"
         info.append(Data(repeating: 0, count: 2))    // trailing pad
-        let parsed = FolderDownloadDecoder.parseInfoBlock(info, encoding: .ascii)
-        #expect(parsed.name == "foo")
+        let parsed = FlattenedFileStream.parseInfoBlock(info, encoding: .ascii)
+        #expect(parsed.fileName == "foo")
         #expect(parsed.comment.isEmpty)
     }
 

@@ -28,7 +28,7 @@ public actor NIOHotlineClient {
     private var connectionSocket: UInt16 = 0
     private var serverVersion: Int = 0
     /// `true` after the server echoed `.resourceForkSupport` on TX 107.
-    /// When set, single-file downloads ship the FILP envelope.
+    /// Informational — downloads always decode the FILP envelope.
     public private(set) var serverSupportsResourceForks: Bool = false
 
     /// `true` after the server echoed `.capabilities` with the
@@ -337,12 +337,10 @@ public actor NIOHotlineClient {
 
     // MARK: File transfers (HTXF side channel)
 
-    /// Download a file. Sends TX 202, pulls `transferID` +
-    /// `transferSize` from the reply, opens an HTXF side channel on
-    /// `settings.port + 1`, and streams the data fork to
-    /// `destination`. Hotline downloads are data-fork only on this
-    /// path — the side channel doesn't carry the FILP envelope, just
-    /// the bytes. Overwrites `destination` if it exists.
+    /// Download a file. Sends TX 202, pulls `transferID` from the
+    /// reply, opens an HTXF side channel on `settings.port + 1`, and
+    /// unwraps the FILP envelope so only the data fork lands in
+    /// `destination`. Overwrites `destination` if it exists.
     public func downloadFile(
         at path: RemotePath,
         name: String,
@@ -360,12 +358,14 @@ public actor NIOHotlineClient {
         guard let transferID = reply.uint32(.transferID) else {
             throw HotlineError.malformedReply(reason: "missing transferID on TX 202 reply")
         }
-        let totalSize = reply.uint32(.transferSize) ?? 0
+        let dataForkSize = reply.uint64(.fileSize64)
+            ?? UInt64(reply.uint32(.fileSize) ?? reply.uint32(.transferSize) ?? 0)
         try await NIOTransferConnection.download(
             host: settings.address,
             transferPort: settings.port + 1,
             transferID: transferID,
-            totalSize: totalSize,
+            dataForkSize: dataForkSize,
+            encoding: stringEncoding,
             to: destination,
             progress: progress
         )

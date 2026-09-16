@@ -86,11 +86,10 @@ public enum HotlineObjectKey: UInt16, Sendable, Hashable, CaseIterable {
 
     /// **Heidrun extension** (not standard Hotline). Single-byte capability
     /// flag (`UInt8 == 1`) exchanged on TX 107 login and TX 121 agree.
-    /// When **both** endpoints send it the negotiated session uses
-    /// FILP/INFO/DATA/MACR framing on single-file downloads (so the
-    /// resource fork rides through end-to-end); when either side omits
-    /// it the side channel falls back to raw data-fork bytes — the
-    /// classic Heidrun dialect. Symmetric on request and reply.
+    /// Historical: heidrun-server ≤ 1.5 shipped a bare data fork on
+    /// single-file downloads unless both sides sent it. Classic Hotline
+    /// always ships the FILP/INFO/DATA/MACR envelope, and so do current
+    /// Heidrun peers; clients keep sending the flag for older servers.
     case resourceForkSupport = 0xE002
 
     // Threaded news
