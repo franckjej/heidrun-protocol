@@ -301,7 +301,11 @@ struct FolderDownloadResumeIntegrationTests {
         let info = buildInfoBlock(name: name)
         var filp = Data()
         filp.append(contentsOf: [0x46, 0x49, 0x4C, 0x50])     // "FILP"
-        filp.append(Data(repeating: 0, count: 32))
+        filp.appendBigEndian(UInt16(1))                        // version
+        filp.append(Data(repeating: 0, count: 16))            // reserved
+        filp.appendBigEndian(UInt16(3))                        // forkCount: INFO + DATA + MACR
+        filp.append(contentsOf: [0x49, 0x4E, 0x46, 0x4F])     // "INFO"
+        filp.append(Data(repeating: 0, count: 8))
         filp.appendBigEndian(UInt32(info.count))              // infoLength at offset 36
 
         // Fork headers carry the length 64-bit (high word at offset 4-7,

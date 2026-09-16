@@ -11,12 +11,10 @@ import Network
 /// transfer it kicks off via the control channel. This actor models that
 /// secondary connection.
 ///
-/// Current scope: downloads only. The server hands us a stream of bytes
-/// (no further framing on top of the 16-byte handshake we send first);
-/// `bytes()` exposes them as an `AsyncThrowingStream<Data, Error>` so the
-/// caller can write them straight to disk, or accumulate, or whatever.
-/// Uploads and the folder-transfer side-protocol live behind separate
-/// methods to be added later.
+/// Downloads decode the FILP envelope through `receiveExactly`
+/// (`FlattenedFileStream`); `bytes()` streams raw bytes up to
+/// `totalSize` for unframed transfers such as the banner. Uploads and
+/// the folder-transfer side-protocol have their own methods.
 public actor FileTransferActor {
     public let transferID: UInt32
     public let totalSize: UInt64

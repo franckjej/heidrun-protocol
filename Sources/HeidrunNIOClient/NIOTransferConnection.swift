@@ -26,16 +26,18 @@ enum NIOTransferConnection {
 
     // MARK: - Download
 
-    /// Stream a transfer's data-fork bytes from `host:transferPort` to
-    /// `destination`. `transferID` + `totalSize` come from the control
-    /// channel's TX 202 reply. Overwrites any existing file at the
-    /// destination path. Streams via `FileHandle` so a multi-GB
-    /// transfer doesn't hold the file in memory.
+    /// Stream a download's data fork from `host:transferPort` to
+    /// `destination`. The side channel carries the FILP envelope; the
+    /// decoder sizes its reads from the fork headers, so the control
+    /// channel's transfer size is never trusted. `dataForkSize` only
+    /// feeds `progress`. Overwrites any existing file at the destination
+    /// path and drops the resource fork (cross-platform path).
     static func download(
         host: String,
         transferPort: UInt16,
         transferID: UInt32,
-        totalSize: UInt32,
+        dataForkSize: UInt64,
+        encoding: String.Encoding,
         to destination: URL,
         progress: (@Sendable (UInt64, UInt64) async -> Void)?
     ) async throws {
@@ -50,7 +52,7 @@ enum NIOTransferConnection {
         defer { _ = channel.close() }
 
         try await writeData(
-            TransferHandshake.encode(transferID: transferID, transferSize: totalSize),
+            TransferHandshake.encode(transferID: transferID, transferSize: 0),
             on: channel
         )
 
@@ -68,17 +70,18 @@ enum NIOTransferConnection {
 
         let reader = ByteAccumulator(stream: stream)
         var received: UInt64 = 0
-        let total = UInt64(totalSize)
-        while received < total {
-            let remaining = total - received
-            let want = Int(min(remaining, UInt64(chunkSize)))
-            let chunk = try await reader.receiveExactly(want)
-            try handle.write(contentsOf: chunk)
-            received += UInt64(chunk.count)
-            if let progress {
-                await progress(received, total)
+        _ = try await FlattenedFileStream.decode(
+            readExactly: { try await reader.receiveExactly($0) },
+            encoding: encoding,
+            window: chunkSize,
+            onData: { chunk in
+                try handle.write(contentsOf: chunk)
+                received += UInt64(chunk.count)
+                if let progress {
+                    await progress(received, dataForkSize)
+                }
             }
-        }
+        )
     }
 
     // MARK: - Upload
