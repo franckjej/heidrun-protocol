@@ -145,11 +145,12 @@ extension HotlineNetworkClient {
             throw HotlineError.malformedReply(reason: "missing transferID")
         }
 
-        let actor = try await openSideChannel(
-            transferID: transferID,
-            totalSize: size,
-            isLargeFile: largeFile
-        )
+        // Large files send their 24-byte handshake now; legacy uploads
+        // defer theirs to `sendUpload`, which knows the envelope size.
+        // Classic servers (hxd) accept exactly one HTXF preamble.
+        let actor = largeFile
+            ? try await openSideChannel(transferID: transferID, totalSize: size, isLargeFile: true)
+            : try await openRawSideChannel(transferID: transferID, totalSize: size)
         activeTransfers[transferID] = actor
         return TransferHandle(transferID: transferID, totalSize: size)
     }
@@ -191,10 +192,8 @@ extension HotlineNetworkClient {
             resourceLength: UInt64(resourceFork.count)
         )
 
-        // Re-send the HTXF handshake with the now-known total size. The
-        // server already saw the zero-size handshake from openSideChannel;
-        // the original Heidrun also opens with `xFerSize=0` and the
-        // server tolerates either flow. Be explicit anyway.
+        // The single HTXF handshake, carrying the envelope size
+        // (HETransferThread.m upload path).
         try await actor.sendBytes(
             TransferHandshake.encode(transferID: handle.transferID, transferSize: UInt32(clamping: total))
         )
