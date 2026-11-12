@@ -25,7 +25,7 @@ Hotline-protocol wire format, codecs, and clients for the [Heidrun][heidrun] Mac
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/franckjej/heidrun-protocol.git", exact: "1.1.2")
+    .package(url: "https://github.com/franckjej/heidrun-protocol.git", exact: "1.1.3")
 ]
 
 // in a target's dependencies:
