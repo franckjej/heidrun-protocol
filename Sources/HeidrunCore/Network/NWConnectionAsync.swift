@@ -77,8 +77,12 @@ extension NWConnection {
     }
 
     /// Start the connection and resume once it's `.ready` (or throw on
-    /// `.failed` / `.cancelled`).
-    public func startAndWaitForReady(on queue: DispatchQueue) async throws {
+    /// `.failed` / `.cancelled`). `onWaiting` sees each `.waiting` error
+    /// (e.g. DNS failure) so a caller's timeout can report the real cause.
+    public func startAndWaitForReady(
+        on queue: DispatchQueue,
+        onWaiting: (@Sendable (NWError) -> Void)? = nil
+    ) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             // Local actor protecting "fired exactly once" semantics so we
             // never call `cont.resume` twice if the state goes
@@ -88,10 +92,12 @@ extension NWConnection {
                 switch state {
                 case .ready:
                     box.tryResume(.success(()))
-                case .failed(let err):
-                    box.tryResume(.failure(err))
+                case .failed(let error):
+                    box.tryResume(.failure(error))
                 case .cancelled:
                     box.tryResume(.failure(HotlineError.notConnected))
+                case .waiting(let error):
+                    onWaiting?(error)
                 default:
                     break
                 }

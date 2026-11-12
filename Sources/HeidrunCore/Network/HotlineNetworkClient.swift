@@ -134,6 +134,7 @@ public actor HotlineNetworkClient: HotlineClient {
             parameters = NWParameters(tls: nil, tcp: tcp)
         }
         let connection = NWConnection(host: host, port: port, using: parameters)
+        let waitingError = WaitingErrorBox()
         // Race the connect against an explicit 15s deadline. NWConnection's
         // `tcp.connectionTimeout` is documented but doesn't reliably flip
         // the connection to `.failed` for black-holed routes (firewall
@@ -142,7 +143,9 @@ public actor HotlineNetworkClient: HotlineClient {
         // a `HotlineError.notConnected` to the host.
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await connection.startAndWaitForReady(on: queue)
+                try await connection.startAndWaitForReady(on: queue) { error in
+                    waitingError.set(error)
+                }
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(15))
@@ -153,13 +156,13 @@ public actor HotlineNetworkClient: HotlineClient {
                 try await group.next()
             } catch {
                 group.cancelAll()
-                // A verify-block rejection fails the handshake without ever
-                // recording an accepted fingerprint — surface that as the
-                // clearer trust error rather than a generic network failure.
-                if settings.useTLS, acceptedBox.value == nil {
+                // Only a verify-block rejection is a trust error; DNS and
+                // other network failures keep their own cause.
+                if acceptedBox.wasRejected {
                     throw HotlineError.certificateNotTrusted
                 }
-                throw error
+                throw Self.connectFailure(
+                    error, waiting: waitingError.value, host: settings.address)
             }
             group.cancelAll()
         }
@@ -187,6 +190,22 @@ public actor HotlineNetworkClient: HotlineClient {
         )
         await engine.start()
         return client
+    }
+
+    /// Map a failed connect onto the error the user should see. A DNS
+    /// failure (thrown, or seen while `.waiting` before the watchdog fired)
+    /// becomes `hostNotFound`; a timeout reports the waiting cause if any.
+    static func connectFailure(_ error: any Error, waiting: NWError?, host: String) -> any Error {
+        if let nwError = error as? NWError, case .dns = nwError {
+            return HotlineError.hostNotFound(host: host)
+        }
+        if let waiting, case .dns = waiting {
+            return HotlineError.hostNotFound(host: host)
+        }
+        if (error as? HotlineError) == .notConnected, let waiting {
+            return waiting
+        }
+        return error
     }
 
     private init(

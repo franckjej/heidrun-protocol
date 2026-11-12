@@ -4,14 +4,25 @@ import Network
 import Security
 import CryptoKit
 
-/// Thread-safe one-shot holder for the fingerprint a handshake accepted,
-/// so `connect` can read it after the connection goes ready and pin it
-/// for the transfer side-channel.
+/// Thread-safe holder for the verify block's outcome: the fingerprint it
+/// accepted (pinned for the transfer side-channel) or that it rejected,
+/// so `connect` only reports a trust error when trust actually failed.
 final class AcceptedFingerprintBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: String?
+    private var rejected = false
     func set(_ value: String) { lock.lock(); stored = value; lock.unlock() }
+    func markRejected() { lock.lock(); rejected = true; lock.unlock() }
     var value: String? { lock.lock(); defer { lock.unlock() }; return stored }
+    var wasRejected: Bool { lock.lock(); defer { lock.unlock() }; return rejected }
+}
+
+/// Last `.waiting` error seen while connecting (e.g. a DNS failure).
+final class WaitingErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: NWError?
+    func set(_ value: NWError) { lock.lock(); stored = value; lock.unlock() }
+    var value: NWError? { lock.lock(); defer { lock.unlock() }; return stored }
 }
 
 /// Ferry a non-Sendable value into a `Task`. The TLS verify completion is a
@@ -44,6 +55,7 @@ enum TLSTrustVerifier {
                 let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
                 let systemTrusted = SecTrustEvaluateWithError(trust, nil)
                 guard let presented = leafFingerprint(of: trust) else {
+                    acceptedBox.markRejected()
                     complete(false); return
                 }
                 switch CertificateTrustPolicy.outcome(
@@ -52,7 +64,10 @@ enum TLSTrustVerifier {
                     acceptedBox.set(presented)
                     complete(true)
                 case .challenge(let reason):
-                    guard let evaluator else { complete(false); return }
+                    guard let evaluator else {
+                        acceptedBox.markRejected()
+                        complete(false); return
+                    }
                     let challenge = CertificateTrustChallenge(
                         host: host, port: port,
                         presentedFingerprint: presented,
@@ -62,7 +77,11 @@ enum TLSTrustVerifier {
                     let completion = UncheckedSendableBox(value: complete)
                     Task {
                         let decision = await evaluator(challenge)
-                        if decision == .trust { acceptedBox.set(presented) }
+                        if decision == .trust {
+                            acceptedBox.set(presented)
+                        } else {
+                            acceptedBox.markRejected()
+                        }
                         completion.value(decision == .trust)
                     }
                 }
