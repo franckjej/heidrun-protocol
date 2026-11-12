@@ -48,6 +48,9 @@ public enum HotlineError: Error, Sendable, Hashable {
     /// cancelled.
     case certificateNotTrusted
 
+    /// DNS couldn't resolve the server's host name.
+    case hostNotFound(host: String)
+
     /// Translate a wire-level error reply into a `HotlineError`. When
     /// the server attached a recognised `HotlineErrorKind` value via
     /// the `.errorKind` object field, the corresponding typed case is
@@ -93,6 +96,8 @@ extension HotlineError: CustomStringConvertible {
             return "not implemented"
         case .certificateNotTrusted:
             return "certificate not trusted"
+        case .hostNotFound(let host):
+            return "host not found: \(host)"
         }
     }
 
@@ -132,6 +137,8 @@ extension HotlineError: CustomStringConvertible {
             return "Heidrun doesn't support this yet."
         case .certificateNotTrusted:
             return "The server's security certificate wasn't trusted, so the connection was cancelled."
+        case .hostNotFound(let host):
+            return "The server address “\(host)” couldn't be found. Check the address or your network's DNS."
         }
     }
 }
